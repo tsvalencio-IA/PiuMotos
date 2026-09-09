@@ -1,0 +1,12 @@
+CONTROLE DE MOTOS — PIU
+
+SUBA TODO O CONTEÚDO DESTA PASTA PARA A RAIZ DE UM REPOSITÓRIO NOVO.
+
+Depois:
+GitHub > Actions > Gerar APK Android - Controle de Motos Piu > Run workflow
+
+Artifact esperado:
+CONTROLE-MOTOS-PIU-APK
+
+O app é offline, sem Firebase e sem permissão de internet.
+Os dados ficam no próprio celular e podem ser exportados/restaurados por backup JSON.

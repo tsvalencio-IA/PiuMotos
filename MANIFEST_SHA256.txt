@@ -1,0 +1,15 @@
+755792a72bdeec02327a780f27a1ce1aca16dfa055c4b9f241691d8c1c0cfbd8  ./.github/workflows/android-apk.yml
+b3eeb7247c1b034cb4e028344da1debd4c0b14f0097d1df981edbfcec8c7117b  ./README.md
+dd5e5eef2b105d64360b2fa50112e359df0c92e44fd40f13e78311761efcb766  ./SUBA_NO_GITHUB.txt
+c321b2912d45a3504eb8f3bcf0f0c9bb67813bc8bbe8ec8b5335cb581a4e977b  ./app/build.gradle
+baf3f801ef1c62fae67f442e5467c642042ae364cfddd2b1d690d60ea489cc01  ./app/proguard-rules.pro
+0652726994293bbf37f49ac0101e3d9d15a7d73a902d1a446607f57b29108dc2  ./app/src/main/AndroidManifest.xml
+37b3db53bb84f80fac1464f21a46d41fa7fdcf96d3b749a03d65b54303a09661  ./app/src/main/java/com/thiaguinho/controlemotospiu/DatabaseHelper.java
+e75a7f981aa2c64706b4e0b481bc9a599a5e077230ccc21df676ed5406a678ac  ./app/src/main/java/com/thiaguinho/controlemotospiu/MainActivity.java
+f3bd63d71ced6e682c891c695d287a6d7b4f25049fba63c9cc6bf698ecd2d2a3  ./app/src/main/res/drawable/ic_launcher.xml
+f49db29d63f0ea1cbed4a6ce904326a2160cb65901f9c3314f33f0127127df00  ./app/src/main/res/values/colors.xml
+57bbfd1cadf17d1cc92051f389a59c52bb2c06527cfa52d56a9e0296075f4322  ./app/src/main/res/values/styles.xml
+2b8be2b20b9a9294516141afda82e9f098d338e9f17a7ebc39a892cd49989f1f  ./app/src/main/res/xml/file_paths.xml
+c3c0cf04da0fc239f391c774554d97d890018ab6e37e87cc62f6070d0c8c9909  ./build.gradle
+cecb2f8bf351ba75d29c55d17f3c22778dc047d58e69922e9bfd920a2ea0bec0  ./gradle.properties
+e3a7a9facbe79fe9b4d93ac333618e7d493f951667864915a48d79febe69af57  ./settings.gradle
