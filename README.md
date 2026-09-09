@@ -1,84 +1,43 @@
-# Controle de Motos — Piu
+# Piu • Controle de Motos — Android nativo/offline
 
-APK Android nativo, offline e sem Firebase para registrar as motos atendidas pelo Piu.
+Aplicativo Android nativo para controlar atendimentos de motos do Piu. Os dados ficam no próprio celular em SQLite, sem Firebase e sem depender de internet.
 
-## Objetivo
+## Versão 1.1.0
 
-Uso rápido no celular, com poucas telas e sem cadastro burocrático. Os dados ficam no próprio aparelho em banco SQLite e o aplicativo não solicita permissão de internet.
+- Interface mobile revisada e mais profissional.
+- Correção de área segura da barra de status do Android.
+- Botão **Voltar** em todas as áreas secundárias.
+- Novo ícone/identidade com moto + ferramenta.
+- Placa Mercosul nos cards, seguindo o padrão visual do cliente.html do SaaS Oficina.
+- Um atendimento aceita **vários serviços separados**, cada um com descrição e valor.
+- Um atendimento aceita **várias peças**, com quantidade, valor unitário e subtotal.
+- Totais automáticos separados: Serviços, Peças e Total Geral.
+- Cards mostram data, total, quantidade de serviços e peças e ações rápidas.
+- IA local consulta placa, KM, datas, serviços, peças, valores, observações e períodos.
+- Relatório PDF redesenhado com placa Mercosul, blocos de serviços/peças, totais e identidade visual.
+- Relatório por período em modo **detalhado** ou **resumido**.
+- PDF individual para compartilhar pelo Android/WhatsApp.
+- Seleção múltipla para relatório e exclusão.
+- Backup JSON completo e restauração.
+- Importa backups antigos da versão 1.0 e converte o serviço único para a nova estrutura de múltiplos serviços.
+- Exportação CSV.
 
-## Funções
+## Dados
 
-- Novo atendimento com placa, KM, data, serviço, peças, valores e observação.
-- Quantas peças forem necessárias por atendimento.
-- Cálculo automático de peças, mão de obra e total.
-- Cards com placa visual Mercosul e KM em destaque.
-- Busca por placa, serviço, peça ou observação.
-- Histórico completo por placa.
-- Edição de atendimento.
-- Exclusão individual.
-- Seleção de vários atendimentos e exclusão em lote.
-- Relatório individual em PDF para compartilhar pelo Android/WhatsApp.
-- Relatório por período em PDF.
-- Relatório dos atendimentos selecionados.
-- Exportação CSV para planilha.
-- Backup completo JSON.
-- Restauração completa de backup JSON.
-- IA local para consultar as informações lançadas no aparelho.
+Banco local: `controle_motos_piu.db`.
 
-## IA local
+Tabelas principais:
+- `services`: atendimento, placa, KM, data e observação.
+- `service_items`: serviços realizados e seus valores.
+- `parts`: peças, quantidade e valores.
 
-A IA local não usa internet, servidor nem API externa. Ela interpreta perguntas e consulta exclusivamente o banco local do aparelho.
+## Gerar o APK no GitHub
 
-Exemplos:
+1. Envie o conteúdo deste ZIP para a raiz de um repositório novo.
+2. Abra **Actions** no GitHub.
+3. Execute **Gerar APK Android - Controle de Motos Piu**.
+4. Baixe o artifact **CONTROLE-MOTOS-PIU-APK**.
 
-- `O que foi feito na ABC1D23?`
-- `Qual o último KM da ABC1D23?`
-- `Quanto deu este mês?`
-- `Quais peças mais usei?`
-- `Qual foi o atendimento mais caro?`
-- `Mostre atendimentos com pastilha`
-- `Procure observação vazamento`
-- `Resumo de hoje`
-
-Ela também faz busca livre nos campos placa, serviço, peças e observações. Se não existir informação lançada que sustente a resposta, informa que não encontrou.
-
-## Banco de dados
-
-SQLite local no Android. É gratuito e fica embutido no aplicativo. Não há Firebase.
-
-O banco continua salvo ao fechar o app. Como qualquer dado local, ele pode ser perdido se o aplicativo for desinstalado ou o aparelho for apagado. Por isso existe o botão **Backup**.
-
-## Como subir em um repositório novo pelo celular
-
-1. Crie um repositório vazio no GitHub.
-2. Extraia este ZIP.
-3. Envie **todo o conteúdo de dentro da pasta `Controle-Motos-Piu` para a raiz do repositório**.
-4. Confirme que `.github/workflows/android-apk.yml` foi enviado.
-5. Abra a aba **Actions** do repositório.
-6. Entre em **Gerar APK Android - Controle de Motos Piu**.
-7. Toque em **Run workflow**.
-8. Ao terminar, abra o build e baixe o artifact **CONTROLE-MOTOS-PIU-APK**.
-9. Extraia o artifact e instale `app-debug.apk` no Android.
-
-## Estrutura principal
-
-```text
-.github/workflows/android-apk.yml
-app/
-  build.gradle
-  src/main/AndroidManifest.xml
-  src/main/java/com/thiaguinho/controlemotospiu/
-    MainActivity.java
-    DatabaseHelper.java
-  src/main/res/
-build.gradle
-gradle.properties
-settings.gradle
-README.md
-```
-
-## Observação sobre assinatura
-
-O GitHub Actions gera APK `debug`, adequado para instalação direta e testes internos. Não foi reaproveitada a chave privada de assinatura do aplicativo do bar.
+O workflow também roda auditoria Lint e publica os logs de diagnóstico.
 
 Powered by thIAguinho Soluções Digitais

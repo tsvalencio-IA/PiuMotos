@@ -23,7 +23,7 @@ import java.util.regex.Pattern;
 
 public class DatabaseHelper extends SQLiteOpenHelper {
     private static final String DB_NAME = "controle_motos_piu.db";
-    private static final int DB_VERSION = 1;
+    private static final int DB_VERSION = 2;
     private final SimpleDateFormat isoDay = new SimpleDateFormat("yyyy-MM-dd", new Locale("pt", "BR"));
     private final SimpleDateFormat brDay = new SimpleDateFormat("dd/MM/yyyy", new Locale("pt", "BR"));
 
@@ -35,7 +35,11 @@ public class DatabaseHelper extends SQLiteOpenHelper {
     }
 
     @Override public void onCreate(SQLiteDatabase db) {
-        db.execSQL("CREATE TABLE services (" +
+        createBaseTables(db);
+    }
+
+    private void createBaseTables(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS services (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT," +
                 "plate TEXT NOT NULL," +
                 "km INTEGER DEFAULT 0," +
@@ -45,7 +49,13 @@ public class DatabaseHelper extends SQLiteOpenHelper {
                 "notes TEXT DEFAULT ''," +
                 "created_at TEXT NOT NULL," +
                 "updated_at TEXT NOT NULL)");
-        db.execSQL("CREATE TABLE parts (" +
+        db.execSQL("CREATE TABLE IF NOT EXISTS service_items (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT," +
+                "service_id INTEGER NOT NULL," +
+                "description TEXT NOT NULL," +
+                "value REAL DEFAULT 0," +
+                "FOREIGN KEY(service_id) REFERENCES services(id) ON DELETE CASCADE)");
+        db.execSQL("CREATE TABLE IF NOT EXISTS parts (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT," +
                 "service_id INTEGER NOT NULL," +
                 "description TEXT NOT NULL," +
@@ -53,22 +63,57 @@ public class DatabaseHelper extends SQLiteOpenHelper {
                 "unit_value REAL DEFAULT 0," +
                 "total_value REAL DEFAULT 0," +
                 "FOREIGN KEY(service_id) REFERENCES services(id) ON DELETE CASCADE)");
-        db.execSQL("CREATE INDEX idx_services_plate ON services(plate)");
-        db.execSQL("CREATE INDEX idx_services_date ON services(service_date)");
-        db.execSQL("CREATE INDEX idx_parts_service ON parts(service_id)");
-        db.execSQL("CREATE INDEX idx_parts_desc ON parts(description)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_services_plate ON services(plate)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_services_date ON services(service_date)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_service_items_service ON service_items(service_id)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_service_items_desc ON service_items(description)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_parts_service ON parts(service_id)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_parts_desc ON parts(description)");
     }
 
-    @Override public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) { }
+    @Override public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+        if (oldVersion < 2) {
+            db.execSQL("CREATE TABLE IF NOT EXISTS service_items (" +
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT," +
+                    "service_id INTEGER NOT NULL," +
+                    "description TEXT NOT NULL," +
+                    "value REAL DEFAULT 0," +
+                    "FOREIGN KEY(service_id) REFERENCES services(id) ON DELETE CASCADE)");
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_service_items_service ON service_items(service_id)");
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_service_items_desc ON service_items(description)");
+            db.execSQL("INSERT INTO service_items(service_id,description,value) " +
+                    "SELECT id,service_text,labor_value FROM services " +
+                    "WHERE trim(service_text)<>'' AND NOT EXISTS(SELECT 1 FROM service_items i WHERE i.service_id=services.id)");
+        }
+    }
 
-    public long saveService(Long id, String plate, long km, String date, String serviceText,
-                            double laborValue, String notes, JSONArray parts, String now) throws Exception {
+    public long saveService(Long id, String plate, long km, String date,
+                            JSONArray serviceItems, String notes, JSONArray parts, String now) throws Exception {
         String normalizedPlate = normalizePlate(plate);
-        if (normalizedPlate.length() < 7) throw new Exception("Informe uma placa válida.");
+        if (normalizedPlate.length() != 7) throw new Exception("Informe uma placa válida com 7 caracteres.");
         if (date == null || date.trim().isEmpty()) throw new Exception("Informe a data do atendimento.");
-        if (serviceText == null || serviceText.trim().isEmpty()) throw new Exception("Informe o serviço realizado.");
-        if (laborValue < 0) throw new Exception("O valor do serviço não pode ser negativo.");
 
+        JSONArray cleanServices = new JSONArray();
+        double serviceTotal = 0;
+        List<String> serviceNames = new ArrayList<>();
+        if (serviceItems != null) {
+            for (int i = 0; i < serviceItems.length(); i++) {
+                JSONObject item = serviceItems.getJSONObject(i);
+                String desc = item.optString("description", "").trim();
+                if (desc.isEmpty()) continue;
+                double value = item.optDouble("value", 0);
+                if (value < 0) throw new Exception("O valor de um serviço não pode ser negativo.");
+                JSONObject clean = new JSONObject();
+                clean.put("description", desc);
+                clean.put("value", round2(value));
+                cleanServices.put(clean);
+                serviceTotal += value;
+                serviceNames.add(desc);
+            }
+        }
+        if (cleanServices.length() == 0) throw new Exception("Adicione pelo menos um serviço realizado.");
+
+        String summaryText = joinServiceNames(serviceNames);
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
@@ -76,8 +121,8 @@ public class DatabaseHelper extends SQLiteOpenHelper {
             values.put("plate", normalizedPlate);
             values.put("km", Math.max(0, km));
             values.put("service_date", date);
-            values.put("service_text", serviceText.trim());
-            values.put("labor_value", round2(laborValue));
+            values.put("service_text", summaryText);
+            values.put("labor_value", round2(serviceTotal));
             values.put("notes", notes == null ? "" : notes.trim());
             values.put("updated_at", now);
             long serviceId;
@@ -88,7 +133,17 @@ public class DatabaseHelper extends SQLiteOpenHelper {
                 int changed = db.update("services", values, "id=?", new String[]{String.valueOf(id)});
                 if (changed == 0) throw new Exception("Atendimento não encontrado.");
                 serviceId = id;
+                db.delete("service_items", "service_id=?", new String[]{String.valueOf(serviceId)});
                 db.delete("parts", "service_id=?", new String[]{String.valueOf(serviceId)});
+            }
+
+            for (int i = 0; i < cleanServices.length(); i++) {
+                JSONObject item = cleanServices.getJSONObject(i);
+                ContentValues iv = new ContentValues();
+                iv.put("service_id", serviceId);
+                iv.put("description", item.getString("description"));
+                iv.put("value", round2(item.optDouble("value", 0)));
+                db.insertOrThrow("service_items", null, iv);
             }
 
             if (parts != null) {
@@ -118,17 +173,22 @@ public class DatabaseHelper extends SQLiteOpenHelper {
 
     public Cursor services(String search, String startDate, String endDate) {
         StringBuilder sql = new StringBuilder(
-                "SELECT s.*, COALESCE((SELECT SUM(p.total_value) FROM parts p WHERE p.service_id=s.id),0) parts_total " +
+                "SELECT s.*, " +
+                "COALESCE((SELECT SUM(p.total_value) FROM parts p WHERE p.service_id=s.id),0) parts_total, " +
+                "COALESCE((SELECT COUNT(*) FROM parts p WHERE p.service_id=s.id),0) parts_count, " +
+                "COALESCE((SELECT COUNT(*) FROM service_items i WHERE i.service_id=s.id),0) service_items_count " +
                 "FROM services s WHERE 1=1");
         List<String> args = new ArrayList<>();
         if (startDate != null && !startDate.isEmpty()) { sql.append(" AND s.service_date>=?"); args.add(startDate); }
         if (endDate != null && !endDate.isEmpty()) { sql.append(" AND s.service_date<=?"); args.add(endDate); }
         String q = search == null ? "" : search.trim();
         if (!q.isEmpty()) {
-            sql.append(" AND (s.plate LIKE ? OR s.plate LIKE ? OR s.service_text LIKE ? OR s.notes LIKE ? OR EXISTS(SELECT 1 FROM parts p WHERE p.service_id=s.id AND p.description LIKE ?))");
+            sql.append(" AND (s.plate LIKE ? OR s.plate LIKE ? OR s.service_text LIKE ? OR s.notes LIKE ? " +
+                    "OR EXISTS(SELECT 1 FROM service_items i WHERE i.service_id=s.id AND i.description LIKE ?) " +
+                    "OR EXISTS(SELECT 1 FROM parts p WHERE p.service_id=s.id AND p.description LIKE ?))");
             String like = "%" + q + "%";
             String plateLike = "%" + normalizePlate(q) + "%";
-            args.add(like); args.add(plateLike); args.add(like); args.add(like); args.add(like);
+            args.add(like); args.add(plateLike); args.add(like); args.add(like); args.add(like); args.add(like);
         }
         sql.append(" ORDER BY s.service_date DESC, s.id DESC");
         return getReadableDatabase().rawQuery(sql.toString(), args.toArray(new String[0]));
@@ -136,8 +196,16 @@ public class DatabaseHelper extends SQLiteOpenHelper {
 
     public Cursor service(long id) {
         return getReadableDatabase().rawQuery(
-                "SELECT s.*, COALESCE((SELECT SUM(p.total_value) FROM parts p WHERE p.service_id=s.id),0) parts_total FROM services s WHERE id=?",
-                new String[]{String.valueOf(id)});
+                "SELECT s.*, " +
+                "COALESCE((SELECT SUM(p.total_value) FROM parts p WHERE p.service_id=s.id),0) parts_total, " +
+                "COALESCE((SELECT COUNT(*) FROM parts p WHERE p.service_id=s.id),0) parts_count, " +
+                "COALESCE((SELECT COUNT(*) FROM service_items i WHERE i.service_id=s.id),0) service_items_count " +
+                "FROM services s WHERE s.id=?", new String[]{String.valueOf(id)});
+    }
+
+    public Cursor serviceItems(long serviceId) {
+        return getReadableDatabase().rawQuery("SELECT * FROM service_items WHERE service_id=? ORDER BY id",
+                new String[]{String.valueOf(serviceId)});
     }
 
     public Cursor parts(long serviceId) {
@@ -161,19 +229,13 @@ public class DatabaseHelper extends SQLiteOpenHelper {
         } finally { db.endTransaction(); }
     }
 
-    public int count(String startDate, String endDate) {
-        Cursor c = summaryCursor(startDate, endDate);
-        try { return c.moveToFirst() ? c.getInt(c.getColumnIndexOrThrow("service_count")) : 0; }
-        finally { c.close(); }
-    }
-
     public Summary summary(String startDate, String endDate) {
         Cursor c = summaryCursor(startDate, endDate);
         try {
             if (!c.moveToFirst()) return new Summary();
             Summary s = new Summary();
             s.count = c.getInt(c.getColumnIndexOrThrow("service_count"));
-            s.labor = c.getDouble(c.getColumnIndexOrThrow("labor_total"));
+            s.labor = c.getDouble(c.getColumnIndexOrThrow("service_total"));
             s.parts = c.getDouble(c.getColumnIndexOrThrow("parts_total"));
             s.total = s.labor + s.parts;
             return s;
@@ -182,7 +244,7 @@ public class DatabaseHelper extends SQLiteOpenHelper {
 
     private Cursor summaryCursor(String startDate, String endDate) {
         StringBuilder sql = new StringBuilder(
-                "SELECT COUNT(*) service_count, COALESCE(SUM(s.labor_value),0) labor_total, " +
+                "SELECT COUNT(*) service_count, COALESCE(SUM(s.labor_value),0) service_total, " +
                 "COALESCE(SUM((SELECT SUM(p.total_value) FROM parts p WHERE p.service_id=s.id)),0) parts_total " +
                 "FROM services s WHERE 1=1");
         List<String> args = new ArrayList<>();
@@ -194,7 +256,7 @@ public class DatabaseHelper extends SQLiteOpenHelper {
     public JSONObject exportAll() throws Exception {
         JSONObject root = new JSONObject();
         root.put("format", "controle-motos-piu");
-        root.put("version", 1);
+        root.put("version", 2);
         JSONArray services = new JSONArray();
         Cursor c = getReadableDatabase().rawQuery("SELECT * FROM services ORDER BY id", null);
         try {
@@ -210,6 +272,19 @@ public class DatabaseHelper extends SQLiteOpenHelper {
                 s.put("notes", c.getString(c.getColumnIndexOrThrow("notes")));
                 s.put("createdAt", c.getString(c.getColumnIndexOrThrow("created_at")));
                 s.put("updatedAt", c.getString(c.getColumnIndexOrThrow("updated_at")));
+
+                JSONArray itemArr = new JSONArray();
+                Cursor items = serviceItems(id);
+                try {
+                    while (items.moveToNext()) {
+                        JSONObject item = new JSONObject();
+                        item.put("description", items.getString(items.getColumnIndexOrThrow("description")));
+                        item.put("value", items.getDouble(items.getColumnIndexOrThrow("value")));
+                        itemArr.put(item);
+                    }
+                } finally { items.close(); }
+                s.put("serviceItems", itemArr);
+
                 JSONArray pArr = new JSONArray();
                 Cursor p = parts(id);
                 try {
@@ -230,26 +305,66 @@ public class DatabaseHelper extends SQLiteOpenHelper {
     }
 
     public void importAll(JSONObject root) throws Exception {
-        if (!"controle-motos-piu".equals(root.optString("format"))) throw new Exception("Este arquivo não é um backup do Controle de Motos do Piu.");
+        if (!"controle-motos-piu".equals(root.optString("format")))
+            throw new Exception("Este arquivo não é um backup do Controle de Motos do Piu.");
         JSONArray arr = root.optJSONArray("services");
         if (arr == null) throw new Exception("Backup inválido: atendimentos não encontrados.");
+
         SQLiteDatabase db = getWritableDatabase();
         db.beginTransaction();
         try {
             db.delete("parts", null, null);
+            db.delete("service_items", null, null);
             db.delete("services", null, null);
+
             for (int i = 0; i < arr.length(); i++) {
                 JSONObject s = arr.getJSONObject(i);
+                JSONArray items = s.optJSONArray("serviceItems");
+                if (items == null || items.length() == 0) {
+                    items = new JSONArray();
+                    String legacyDesc = s.optString("serviceText", "").trim();
+                    if (!legacyDesc.isEmpty()) {
+                        JSONObject legacy = new JSONObject();
+                        legacy.put("description", legacyDesc);
+                        legacy.put("value", s.optDouble("laborValue", 0));
+                        items.put(legacy);
+                    }
+                }
+                if (items.length() == 0) continue;
+
+                double totalServices = 0;
+                List<String> names = new ArrayList<>();
+                for (int j = 0; j < items.length(); j++) {
+                    JSONObject item = items.getJSONObject(j);
+                    String desc = item.optString("description", "").trim();
+                    if (desc.isEmpty()) continue;
+                    names.add(desc);
+                    totalServices += Math.max(0, item.optDouble("value", 0));
+                }
+                if (names.isEmpty()) continue;
+
                 ContentValues v = new ContentValues();
                 v.put("plate", normalizePlate(s.optString("plate")));
                 v.put("km", s.optLong("km", 0));
                 v.put("service_date", s.optString("serviceDate"));
-                v.put("service_text", s.optString("serviceText"));
-                v.put("labor_value", round2(s.optDouble("laborValue", 0)));
+                v.put("service_text", joinServiceNames(names));
+                v.put("labor_value", round2(totalServices));
                 v.put("notes", s.optString("notes", ""));
                 v.put("created_at", s.optString("createdAt", nowIso()));
                 v.put("updated_at", s.optString("updatedAt", nowIso()));
                 long newId = db.insertOrThrow("services", null, v);
+
+                for (int j = 0; j < items.length(); j++) {
+                    JSONObject item = items.getJSONObject(j);
+                    String desc = item.optString("description", "").trim();
+                    if (desc.isEmpty()) continue;
+                    ContentValues iv = new ContentValues();
+                    iv.put("service_id", newId);
+                    iv.put("description", desc);
+                    iv.put("value", round2(Math.max(0, item.optDouble("value", 0))));
+                    db.insertOrThrow("service_items", null, iv);
+                }
+
                 JSONArray parts = s.optJSONArray("parts");
                 if (parts != null) {
                     for (int j = 0; j < parts.length(); j++) {
@@ -261,9 +376,9 @@ public class DatabaseHelper extends SQLiteOpenHelper {
                         ContentValues pv = new ContentValues();
                         pv.put("service_id", newId);
                         pv.put("description", desc);
-                        pv.put("quantity", qty);
-                        pv.put("unit_value", round2(unit));
-                        pv.put("total_value", round2(qty * unit));
+                        pv.put("quantity", qty <= 0 ? 1 : qty);
+                        pv.put("unit_value", round2(Math.max(0, unit)));
+                        pv.put("total_value", round2((qty <= 0 ? 1 : qty) * Math.max(0, unit)));
                         db.insertOrThrow("parts", null, pv);
                     }
                 }
@@ -274,24 +389,38 @@ public class DatabaseHelper extends SQLiteOpenHelper {
 
     public String exportCsv(String startDate, String endDate) {
         StringBuilder out = new StringBuilder();
-        out.append("Data;Placa;KM;Servico;Pecas;Mao_de_obra;Total;Observacao\n");
+        out.append("Data;Placa;KM;Servicos;Pecas;Total_servicos;Total_pecas;Total;Observacao\n");
         Cursor c = services("", startDate, endDate);
         try {
             while (c.moveToNext()) {
                 long id = c.getLong(c.getColumnIndexOrThrow("id"));
-                double labor = c.getDouble(c.getColumnIndexOrThrow("labor_value"));
+                double servicesTotal = c.getDouble(c.getColumnIndexOrThrow("labor_value"));
                 double partsTotal = c.getDouble(c.getColumnIndexOrThrow("parts_total"));
                 out.append(csv(br(c.getString(c.getColumnIndexOrThrow("service_date"))))).append(';')
-                   .append(csv(c.getString(c.getColumnIndexOrThrow("plate")))).append(';')
+                   .append(csv(displayPlate(c.getString(c.getColumnIndexOrThrow("plate"))))).append(';')
                    .append(c.getLong(c.getColumnIndexOrThrow("km"))).append(';')
-                   .append(csv(c.getString(c.getColumnIndexOrThrow("service_text")))).append(';')
+                   .append(csv(servicesInline(id))).append(';')
                    .append(csv(partsInline(id))).append(';')
-                   .append(String.format(Locale.US, "%.2f", labor)).append(';')
-                   .append(String.format(Locale.US, "%.2f", labor + partsTotal)).append(';')
+                   .append(String.format(Locale.US, "%.2f", servicesTotal)).append(';')
+                   .append(String.format(Locale.US, "%.2f", partsTotal)).append(';')
+                   .append(String.format(Locale.US, "%.2f", servicesTotal + partsTotal)).append(';')
                    .append(csv(c.getString(c.getColumnIndexOrThrow("notes")))).append('\n');
             }
         } finally { c.close(); }
         return out.toString();
+    }
+
+    public String servicesInline(long serviceId) {
+        StringBuilder sb = new StringBuilder();
+        Cursor c = serviceItems(serviceId);
+        try {
+            while (c.moveToNext()) {
+                if (sb.length() > 0) sb.append(" | ");
+                sb.append(c.getString(c.getColumnIndexOrThrow("description")))
+                  .append(" — ").append(money(c.getDouble(c.getColumnIndexOrThrow("value"))));
+            }
+        } finally { c.close(); }
+        return sb.toString();
     }
 
     public String partsInline(long serviceId) {
@@ -300,9 +429,11 @@ public class DatabaseHelper extends SQLiteOpenHelper {
         try {
             while (p.moveToNext()) {
                 if (sb.length() > 0) sb.append(" | ");
+                double qty = p.getDouble(p.getColumnIndexOrThrow("quantity"));
+                double unit = p.getDouble(p.getColumnIndexOrThrow("unit_value"));
                 sb.append(p.getString(p.getColumnIndexOrThrow("description")))
-                  .append(" x")
-                  .append(formatQty(p.getDouble(p.getColumnIndexOrThrow("quantity"))));
+                  .append(" x").append(formatQty(qty))
+                  .append(" — ").append(money(qty * unit));
             }
         } finally { p.close(); }
         return sb.toString();
@@ -320,63 +451,70 @@ public class DatabaseHelper extends SQLiteOpenHelper {
             try {
                 if (!c.moveToFirst()) return "Não encontrei atendimento para a placa " + displayPlate(plate) + range.labelSuffix() + ".";
                 if (containsAny(n, "ultimo km", "quilometragem", " km", "km ")) {
-                    return "Último KM registrado de " + displayPlate(plate) + ": " + formatInt(c.getLong(c.getColumnIndexOrThrow("km"))) + " km, em " + br(c.getString(c.getColumnIndexOrThrow("service_date"))) + ".";
-                }
-                if (containsAny(n, "observacao", "observacoes")) {
-                    StringBuilder sb = new StringBuilder(); int shown=0;
-                    do {
-                        String notes=c.getString(c.getColumnIndexOrThrow("notes"));
-                        if(notes!=null&&!notes.trim().isEmpty()){
-                            if(shown>0)sb.append("\n");
-                            sb.append(br(c.getString(c.getColumnIndexOrThrow("service_date")))).append(" • ").append(notes.trim()); shown++;
-                        }
-                    } while(c.moveToNext());
-                    return shown==0 ? "Não há observações registradas para "+displayPlate(plate)+range.labelSuffix()+"." : "Observações de "+displayPlate(plate)+range.labelSuffix()+":\n"+sb;
+                    return "Último KM registrado de " + displayPlate(plate) + ": " +
+                            formatInt(c.getLong(c.getColumnIndexOrThrow("km"))) + " km, em " +
+                            br(c.getString(c.getColumnIndexOrThrow("service_date"))) + ".";
                 }
                 if (containsAny(n, "quanto", "total", "gasto", "valor", "fatur")) {
-                    double total = 0, labor = 0, parts = 0; int count = 0;
+                    double servicesTotal = 0, partsTotal = 0; int count = 0;
                     do {
-                        double l = c.getDouble(c.getColumnIndexOrThrow("labor_value"));
-                        double p = c.getDouble(c.getColumnIndexOrThrow("parts_total"));
-                        labor += l; parts += p; total += l + p; count++;
+                        servicesTotal += c.getDouble(c.getColumnIndexOrThrow("labor_value"));
+                        partsTotal += c.getDouble(c.getColumnIndexOrThrow("parts_total"));
+                        count++;
                     } while (c.moveToNext());
-                    return displayPlate(plate) + range.labelSuffix() + ": " + count + " atendimento(s), mão de obra " + money(labor) + ", peças " + money(parts) + ", total " + money(total) + ".";
+                    return displayPlate(plate) + range.labelSuffix() + ": " + count + " atendimento(s), serviços " +
+                            money(servicesTotal) + ", peças " + money(partsTotal) + ", total " + money(servicesTotal + partsTotal) + ".";
                 }
-                if (containsAny(n, "ultimo", "o que foi feito", "servico", "atendimento", "historico", "histórico", "peca", "peças", "pecas")) {
-                    StringBuilder sb = new StringBuilder();
-                    int shown = 0;
-                    int limit = (n.contains("ultimo") && !n.contains("histor")) ? 1 : (containsAny(n,"completo","todos","tudo") ? 50 : 10);
-                    do {
-                        long id = c.getLong(c.getColumnIndexOrThrow("id"));
-                        if (shown > 0) sb.append("\n");
-                        sb.append(br(c.getString(c.getColumnIndexOrThrow("service_date")))).append(" • ")
-                          .append(formatInt(c.getLong(c.getColumnIndexOrThrow("km")))).append(" km • ")
-                          .append(c.getString(c.getColumnIndexOrThrow("service_text")));
-                        String pi = partsInline(id);
-                        if (!pi.isEmpty()) sb.append(" • Peças: ").append(pi);
-                        String notes=c.getString(c.getColumnIndexOrThrow("notes"));
-                        if(notes!=null&&!notes.trim().isEmpty()&&containsAny(n,"completo","tudo","observ")) sb.append(" • Obs.: ").append(notes.trim());
-                        sb.append(" • Total: ").append(money(c.getDouble(c.getColumnIndexOrThrow("labor_value")) + c.getDouble(c.getColumnIndexOrThrow("parts_total"))));
-                        shown++;
-                    } while (shown < limit && c.moveToNext());
-                    return (limit==1?"Último atendimento de ":"Histórico de ") + displayPlate(plate) + range.labelSuffix() + ":\n" + sb;
-                }
+                StringBuilder sb = new StringBuilder("Histórico de ").append(displayPlate(plate)).append(range.labelSuffix()).append(":");
+                int shown = 0;
+                do {
+                    long id = c.getLong(c.getColumnIndexOrThrow("id"));
+                    double st = c.getDouble(c.getColumnIndexOrThrow("labor_value"));
+                    double pt = c.getDouble(c.getColumnIndexOrThrow("parts_total"));
+                    sb.append("\n\n").append(br(c.getString(c.getColumnIndexOrThrow("service_date"))))
+                      .append(" • ").append(formatInt(c.getLong(c.getColumnIndexOrThrow("km")))).append(" km")
+                      .append("\nServiços: ").append(servicesInline(id));
+                    String parts = partsInline(id);
+                    if (!parts.isEmpty()) sb.append("\nPeças: ").append(parts);
+                    String notes = c.getString(c.getColumnIndexOrThrow("notes"));
+                    if (notes != null && !notes.trim().isEmpty()) sb.append("\nObs.: ").append(notes.trim());
+                    sb.append("\nTotal: ").append(money(st + pt));
+                    shown++;
+                } while (c.moveToNext() && shown < 10);
+                return sb.toString();
             } finally { c.close(); }
         }
 
-        if (containsAny(n, "peca mais", "peças mais", "pecas mais", "mais usada", "mais usadas")) {
-            String sql = "SELECT p.description, SUM(p.quantity) qty, SUM(p.total_value) total FROM parts p JOIN services s ON s.id=p.service_id WHERE 1=1";
+        if (containsAny(n, "pecas mais", "peca mais", "mais usei", "mais usada", "mais usadas")) {
+            String sql = "SELECT p.description, SUM(p.quantity) qtd, SUM(p.total_value) total FROM parts p " +
+                    "JOIN services s ON s.id=p.service_id WHERE 1=1";
             List<String> args = new ArrayList<>();
             if (range.start != null) { sql += " AND s.service_date>=?"; args.add(range.start); }
             if (range.end != null) { sql += " AND s.service_date<=?"; args.add(range.end); }
-            sql += " GROUP BY lower(p.description) ORDER BY qty DESC, total DESC LIMIT 8";
+            sql += " GROUP BY lower(p.description) ORDER BY qtd DESC,total DESC LIMIT 12";
             Cursor c = getReadableDatabase().rawQuery(sql, args.toArray(new String[0]));
             try {
                 if (!c.moveToFirst()) return "Ainda não há peças registradas" + range.labelSuffix() + ".";
-                StringBuilder sb = new StringBuilder("Peças mais usadas" + range.labelSuffix() + ":");
-                do {
-                    sb.append("\n• ").append(c.getString(0)).append(" — ").append(formatQty(c.getDouble(1))).append(" un. — ").append(money(c.getDouble(2)));
-                } while (c.moveToNext());
+                StringBuilder sb = new StringBuilder("Peças mais usadas").append(range.labelSuffix()).append(":");
+                do sb.append("\n• ").append(c.getString(0)).append(" — ").append(formatQty(c.getDouble(1))).append(" un. — ").append(money(c.getDouble(2)));
+                while (c.moveToNext());
+                return sb.toString();
+            } finally { c.close(); }
+        }
+
+        if (containsAny(n, "quais servicos", "servicos fiz", "servico mais", "servicos mais")) {
+            String sql = "SELECT i.description, COUNT(*) qtd, SUM(i.value) total FROM service_items i " +
+                    "JOIN services s ON s.id=i.service_id WHERE 1=1";
+            List<String> args = new ArrayList<>();
+            if (range.start != null) { sql += " AND s.service_date>=?"; args.add(range.start); }
+            if (range.end != null) { sql += " AND s.service_date<=?"; args.add(range.end); }
+            sql += " GROUP BY lower(i.description) ORDER BY qtd DESC,total DESC LIMIT 15";
+            Cursor c = getReadableDatabase().rawQuery(sql, args.toArray(new String[0]));
+            try {
+                if (!c.moveToFirst()) return "Ainda não há serviços registrados" + range.labelSuffix() + ".";
+                StringBuilder sb = new StringBuilder("Serviços registrados").append(range.labelSuffix()).append(":");
+                do sb.append("\n• ").append(c.getString(0)).append(" — ").append(c.getInt(1)).append(" vez(es) — ").append(money(c.getDouble(2)));
+                while (c.moveToNext());
                 return sb.toString();
             } finally { c.close(); }
         }
@@ -386,58 +524,66 @@ public class DatabaseHelper extends SQLiteOpenHelper {
             List<String> args = new ArrayList<>();
             if (range.start != null) { sql += " AND s.service_date>=?"; args.add(range.start); }
             if (range.end != null) { sql += " AND s.service_date<=?"; args.add(range.end); }
-            sql += " ORDER BY (s.labor_value + parts_total) DESC LIMIT 1";
+            sql += " ORDER BY (s.labor_value + COALESCE((SELECT SUM(p.total_value) FROM parts p WHERE p.service_id=s.id),0)) DESC LIMIT 1";
             Cursor c = getReadableDatabase().rawQuery(sql, args.toArray(new String[0]));
             try {
                 if (!c.moveToFirst()) return "Ainda não há atendimentos" + range.labelSuffix() + ".";
-                return "Maior atendimento" + range.labelSuffix() + ": " + displayPlate(c.getString(c.getColumnIndexOrThrow("plate"))) + ", em " + br(c.getString(c.getColumnIndexOrThrow("service_date"))) + ", " + c.getString(c.getColumnIndexOrThrow("service_text")) + ", total " + money(c.getDouble(c.getColumnIndexOrThrow("labor_value")) + c.getDouble(c.getColumnIndexOrThrow("parts_total"))) + ".";
+                long id = c.getLong(c.getColumnIndexOrThrow("id"));
+                return "Maior atendimento" + range.labelSuffix() + ": " + displayPlate(c.getString(c.getColumnIndexOrThrow("plate"))) +
+                        ", em " + br(c.getString(c.getColumnIndexOrThrow("service_date"))) + ", serviços: " + servicesInline(id) +
+                        ", total " + money(c.getDouble(c.getColumnIndexOrThrow("labor_value")) + c.getDouble(c.getColumnIndexOrThrow("parts_total"))) + ".";
             } finally { c.close(); }
         }
 
-        if (containsAny(n, "quais servicos", "servicos fiz", "servico mais", "servicos mais")) {
-            String sql="SELECT s.service_text, COUNT(*) qtd, SUM(s.labor_value + COALESCE((SELECT SUM(p.total_value) FROM parts p WHERE p.service_id=s.id),0)) total FROM services s WHERE 1=1";
-            List<String> args=new ArrayList<>();
-            if(range.start!=null){sql+=" AND s.service_date>=?";args.add(range.start);} if(range.end!=null){sql+=" AND s.service_date<=?";args.add(range.end);}
-            sql+=" GROUP BY lower(s.service_text) ORDER BY qtd DESC, total DESC LIMIT 12";
-            Cursor c=getReadableDatabase().rawQuery(sql,args.toArray(new String[0]));
-            try{if(!c.moveToFirst())return "Ainda não há serviços registrados"+range.labelSuffix()+".";StringBuilder sb=new StringBuilder("Serviços registrados"+range.labelSuffix()+":");do{sb.append("\n• ").append(c.getString(0)).append(" — ").append(c.getInt(1)).append(" atendimento(s) — ").append(money(c.getDouble(2)));}while(c.moveToNext());return sb.toString();}finally{c.close();}
-        }
-
         if (containsAny(n, "quantas motos", "quais motos", "placas atendidas", "motos atendidas")) {
-            String sql="SELECT s.plate, COUNT(*) qtd, MAX(s.service_date) ultima FROM services s WHERE 1=1";List<String> args=new ArrayList<>();
-            if(range.start!=null){sql+=" AND s.service_date>=?";args.add(range.start);} if(range.end!=null){sql+=" AND s.service_date<=?";args.add(range.end);} sql+=" GROUP BY s.plate ORDER BY ultima DESC";
-            Cursor c=getReadableDatabase().rawQuery(sql,args.toArray(new String[0]));
-            try{if(!c.moveToFirst())return "Nenhuma moto encontrada"+range.labelSuffix()+".";StringBuilder sb=new StringBuilder();int count=0;do{count++;if(count<=20)sb.append("\n• ").append(displayPlate(c.getString(0))).append(" — ").append(c.getInt(1)).append(" atendimento(s) — último ").append(br(c.getString(2)));}while(c.moveToNext());return count+" moto(s) diferente(s)"+range.labelSuffix()+":"+sb+(count>20?"\n… e mais "+(count-20)+".":"");}finally{c.close();}
+            String sql = "SELECT s.plate, COUNT(*) qtd, MAX(s.service_date) ultima FROM services s WHERE 1=1";
+            List<String> args = new ArrayList<>();
+            if (range.start != null) { sql += " AND s.service_date>=?"; args.add(range.start); }
+            if (range.end != null) { sql += " AND s.service_date<=?"; args.add(range.end); }
+            sql += " GROUP BY s.plate ORDER BY ultima DESC";
+            Cursor c = getReadableDatabase().rawQuery(sql, args.toArray(new String[0]));
+            try {
+                if (!c.moveToFirst()) return "Nenhuma moto encontrada" + range.labelSuffix() + ".";
+                StringBuilder sb = new StringBuilder(); int count = 0;
+                do {
+                    count++;
+                    if (count <= 20) sb.append("\n• ").append(displayPlate(c.getString(0))).append(" — ").append(c.getInt(1)).append(" atendimento(s) — último ").append(br(c.getString(2)));
+                } while (c.moveToNext());
+                return count + " moto(s) diferente(s)" + range.labelSuffix() + ":" + sb + (count > 20 ? "\n… e mais " + (count - 20) + "." : "");
+            } finally { c.close(); }
         }
 
         if (containsAny(n, "quanto", "total", "fatur", "resumo", "quantos", "atendimentos", "movimento")) {
             Summary s = summary(range.start, range.end);
-            return "Resumo" + range.labelSuffix() + ": " + s.count + " atendimento(s), mão de obra " + money(s.labor) + ", peças " + money(s.parts) + ", total " + money(s.total) + ".";
+            return "Resumo" + range.labelSuffix() + ": " + s.count + " atendimento(s), serviços " + money(s.labor) +
+                    ", peças " + money(s.parts) + ", total " + money(s.total) + ".";
         }
 
-        // Busca livre em absolutamente todos os textos lançados.
+        // Busca livre em placa, serviços, peças e observações.
         List<String> terms = usefulTerms(n);
         if (terms.isEmpty()) terms.add(question.trim());
         Set<Long> ids = new LinkedHashSet<>();
         for (String term : terms) {
             Cursor c = services(term, range.start, range.end);
-            try { while (c.moveToNext() && ids.size() < 12) ids.add(c.getLong(c.getColumnIndexOrThrow("id"))); }
-            finally { c.close(); }
+            try {
+                while (c.moveToNext() && ids.size() < 12) ids.add(c.getLong(c.getColumnIndexOrThrow("id")));
+            } finally { c.close(); }
         }
         if (ids.isEmpty()) return "Não encontrei informação lançada que corresponda a “" + question + "”.";
+
         StringBuilder sb = new StringBuilder("Encontrei ").append(ids.size()).append(" atendimento(s) relacionado(s):");
         int shown = 0;
         for (Long id : ids) {
             Cursor c = service(id);
             try {
                 if (!c.moveToFirst()) continue;
-                sb.append("\n• ").append(br(c.getString(c.getColumnIndexOrThrow("service_date"))))
+                sb.append("\n\n• ").append(br(c.getString(c.getColumnIndexOrThrow("service_date"))))
                   .append(" — ").append(displayPlate(c.getString(c.getColumnIndexOrThrow("plate"))))
-                  .append(" — ").append(c.getString(c.getColumnIndexOrThrow("service_text")));
+                  .append("\nServiços: ").append(servicesInline(id));
                 String pi = partsInline(id);
-                if (!pi.isEmpty()) sb.append(" — Peças: ").append(pi);
+                if (!pi.isEmpty()) sb.append("\nPeças: ").append(pi);
                 String notes = c.getString(c.getColumnIndexOrThrow("notes"));
-                if (notes != null && !notes.trim().isEmpty()) sb.append(" — Obs.: ").append(notes.trim());
+                if (notes != null && !notes.trim().isEmpty()) sb.append("\nObs.: ").append(notes.trim());
                 shown++;
                 if (shown >= 8) break;
             } finally { c.close(); }
@@ -452,22 +598,21 @@ public class DatabaseHelper extends SQLiteOpenHelper {
             r.start = r.end = isoDay.format(now.getTime()); r.label = " de hoje"; return r;
         }
         if (normalized.contains("mes passado") || normalized.contains("ultimo mes")) {
-            Calendar start=(Calendar)now.clone();start.add(Calendar.MONTH,-1);start.set(Calendar.DAY_OF_MONTH,1);
-            Calendar end=(Calendar)start.clone();end.set(Calendar.DAY_OF_MONTH,end.getActualMaximum(Calendar.DAY_OF_MONTH));
-            r.start=isoDay.format(start.getTime());r.end=isoDay.format(end.getTime());r.label=" do mês passado";return r;
+            Calendar start = (Calendar) now.clone(); start.add(Calendar.MONTH, -1); start.set(Calendar.DAY_OF_MONTH, 1);
+            Calendar end = (Calendar) start.clone(); end.set(Calendar.DAY_OF_MONTH, end.getActualMaximum(Calendar.DAY_OF_MONTH));
+            r.start = isoDay.format(start.getTime()); r.end = isoDay.format(end.getTime()); r.label = " do mês passado"; return r;
         }
         if (normalized.contains("este ano") || normalized.contains("ano atual")) {
-            Calendar start=(Calendar)now.clone();start.set(Calendar.DAY_OF_YEAR,1);r.start=isoDay.format(start.getTime());r.end=isoDay.format(now.getTime());r.label=" deste ano";return r;
+            Calendar start = (Calendar) now.clone(); start.set(Calendar.DAY_OF_YEAR, 1);
+            r.start = isoDay.format(start.getTime()); r.end = isoDay.format(now.getTime()); r.label = " deste ano"; return r;
         }
         if (normalized.contains("este mes") || normalized.contains("nesse mes") || normalized.contains("no mes")) {
             Calendar start = (Calendar) now.clone(); start.set(Calendar.DAY_OF_MONTH, 1);
             r.start = isoDay.format(start.getTime()); r.end = isoDay.format(now.getTime()); r.label = " deste mês"; return r;
         }
         if (normalized.contains("esta semana") || normalized.contains("semana")) {
-            Calendar start = (Calendar) now.clone();
-            start.setFirstDayOfWeek(Calendar.MONDAY);
-            int day = start.get(Calendar.DAY_OF_WEEK);
-            int diff = (day == Calendar.SUNDAY ? -6 : Calendar.MONDAY - day);
+            Calendar start = (Calendar) now.clone(); start.setFirstDayOfWeek(Calendar.MONDAY);
+            int day = start.get(Calendar.DAY_OF_WEEK); int diff = (day == Calendar.SUNDAY ? -6 : Calendar.MONDAY - day);
             start.add(Calendar.DAY_OF_MONTH, diff);
             r.start = isoDay.format(start.getTime()); r.end = isoDay.format(now.getTime()); r.label = " desta semana"; return r;
         }
@@ -482,35 +627,49 @@ public class DatabaseHelper extends SQLiteOpenHelper {
 
     private List<String> usefulTerms(String normalized) {
         String[] stop = {"qual","quais","quanto","quantos","quem","onde","como","foi","foram","feito","feita","fizeram","mostre","mostrar","me","de","da","do","das","dos","em","no","na","nos","nas","um","uma","o","a","os","as","e","para","por","com","piu","moto","motos","atendimento","atendimentos","servico","servicos","peca","pecas","valor","valores"};
-        Set<String> stopSet = new LinkedHashSet<>(); for(String s:stop) stopSet.add(s);
+        Set<String> stopSet = new LinkedHashSet<>(); for (String s : stop) stopSet.add(s);
         List<String> out = new ArrayList<>();
         for (String t : normalized.split("\\s+")) if (t.length() >= 3 && !stopSet.contains(t)) out.add(t);
         return out;
     }
 
     private boolean containsAny(String text, String... terms) { for (String t : terms) if (text.contains(t)) return true; return false; }
+
     private String extractPlate(String text) {
         Matcher m = Pattern.compile("(?i)\\b([A-Z]{3}[- ]?[0-9][A-Z0-9][0-9]{2}|[A-Z]{3}[- ]?[0-9]{4})\\b").matcher(text);
         return m.find() ? normalizePlate(m.group(1)) : null;
     }
+
     public static String normalizePlate(String plate) { return plate == null ? "" : plate.toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9]", ""); }
+
     public static String displayPlate(String plate) {
         String p = normalizePlate(plate);
-        if (p.matches("[A-Z]{3}[0-9]{4}")) return p.substring(0,3) + "-" + p.substring(3);
+        if (p.matches("[A-Z]{3}[0-9]{4}")) return p.substring(0, 3) + "-" + p.substring(3);
         return p;
     }
+
     private String normalizeText(String s) {
         String n = Normalizer.normalize(s == null ? "" : s, Normalizer.Form.NFD).replaceAll("\\p{M}", "").toLowerCase(Locale.ROOT);
         return n.replaceAll("[^a-z0-9/ -]", " ").replaceAll("\\s+", " ").trim();
     }
+
     private String br(String iso) { try { return brDay.format(isoDay.parse(iso)); } catch (Exception e) { return iso; } }
     private String toIso(String br) { try { return isoDay.format(brDay.parse(br)); } catch (Exception e) { return null; } }
     private String csv(String s) { return '"' + (s == null ? "" : s.replace("\"", "\"\"")) + '"'; }
     private static String nowIso() { return new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).format(new Date()); }
     private double round2(double v) { return Math.round(v * 100.0) / 100.0; }
     private String money(double v) { return String.format(new Locale("pt", "BR"), "R$ %,.2f", v); }
-    private String formatQty(double v) { return Math.abs(v - Math.rint(v)) < 0.000001 ? String.valueOf((long)Math.rint(v)) : String.format(new Locale("pt", "BR"), "%.2f", v); }
+    private String formatQty(double v) { return Math.abs(v - Math.rint(v)) < 0.000001 ? String.valueOf((long) Math.rint(v)) : String.format(new Locale("pt", "BR"), "%.2f", v); }
     private String formatInt(long v) { return String.format(new Locale("pt", "BR"), "%,d", v); }
+
+    private static String joinServiceNames(List<String> names) {
+        StringBuilder sb = new StringBuilder();
+        for (String name : names) {
+            if (sb.length() > 0) sb.append(" • ");
+            sb.append(name);
+        }
+        return sb.toString();
+    }
 
     public static class Summary { public int count; public double labor, parts, total; }
     private static class DateRange {

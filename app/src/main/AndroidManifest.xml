@@ -2,7 +2,7 @@
     <application
         android:allowBackup="true"
         android:fullBackupContent="true"
-        android:label="Controle de Motos - Piu"
+        android:label="Piu • Controle de Motos"
         android:icon="@drawable/ic_launcher"
         android:roundIcon="@drawable/ic_launcher"
         android:theme="@style/Theme.ControleMotosPiu"
