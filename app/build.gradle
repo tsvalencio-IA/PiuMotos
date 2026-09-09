@@ -8,8 +8,8 @@ android {
         applicationId 'com.thiaguinho.controlemotospiu'
         minSdk 24
         targetSdk 35
-        versionCode 2
-        versionName '1.1.0'
+        versionCode 3
+        versionName '1.1.1'
     }
 
     buildTypes {
@@ -23,6 +23,19 @@ android {
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+// Compatibilidade das dependências Kotlin transitivas do AndroidX.
+// Kotlin 1.8+ incorporou as classes que antes ficavam nos módulos jdk7/jdk8.
+// Excluir os módulos antigos evita Duplicate class no GitHub Actions.
+configurations.configureEach {
+    exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'
+    exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'
+
+    resolutionStrategy {
+        force 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'
+        force 'org.jetbrains.kotlin:kotlin-stdlib-common:1.8.22'
     }
 }
 
