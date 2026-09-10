@@ -23,7 +23,7 @@ import java.util.regex.Pattern;
 
 public class DatabaseHelper extends SQLiteOpenHelper {
     private static final String DB_NAME = "controle_motos_piu.db";
-    private static final int DB_VERSION = 2;
+    private static final int DB_VERSION = 3;
     private final SimpleDateFormat isoDay = new SimpleDateFormat("yyyy-MM-dd", new Locale("pt", "BR"));
     private final SimpleDateFormat brDay = new SimpleDateFormat("dd/MM/yyyy", new Locale("pt", "BR"));
 
@@ -48,7 +48,8 @@ public class DatabaseHelper extends SQLiteOpenHelper {
                 "labor_value REAL DEFAULT 0," +
                 "notes TEXT DEFAULT ''," +
                 "created_at TEXT NOT NULL," +
-                "updated_at TEXT NOT NULL)");
+                "updated_at TEXT NOT NULL," +
+                "status TEXT NOT NULL DEFAULT 'OPEN')");
         db.execSQL("CREATE TABLE IF NOT EXISTS service_items (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT," +
                 "service_id INTEGER NOT NULL," +
@@ -65,6 +66,7 @@ public class DatabaseHelper extends SQLiteOpenHelper {
                 "FOREIGN KEY(service_id) REFERENCES services(id) ON DELETE CASCADE)");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_services_plate ON services(plate)");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_services_date ON services(service_date)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_services_status ON services(status)");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_service_items_service ON service_items(service_id)");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_service_items_desc ON service_items(description)");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_parts_service ON parts(service_id)");
@@ -84,6 +86,10 @@ public class DatabaseHelper extends SQLiteOpenHelper {
             db.execSQL("INSERT INTO service_items(service_id,description,value) " +
                     "SELECT id,service_text,labor_value FROM services " +
                     "WHERE trim(service_text)<>'' AND NOT EXISTS(SELECT 1 FROM service_items i WHERE i.service_id=services.id)");
+        }
+        if (oldVersion < 3) {
+            db.execSQL("ALTER TABLE services ADD COLUMN status TEXT NOT NULL DEFAULT 'OPEN'");
+            db.execSQL("CREATE INDEX IF NOT EXISTS idx_services_status ON services(status)");
         }
     }
 
@@ -172,6 +178,10 @@ public class DatabaseHelper extends SQLiteOpenHelper {
     }
 
     public Cursor services(String search, String startDate, String endDate) {
+        return services(search, startDate, endDate, "ALL");
+    }
+
+    public Cursor services(String search, String startDate, String endDate, String status) {
         StringBuilder sql = new StringBuilder(
                 "SELECT s.*, " +
                 "COALESCE((SELECT SUM(p.total_value) FROM parts p WHERE p.service_id=s.id),0) parts_total, " +
@@ -181,6 +191,8 @@ public class DatabaseHelper extends SQLiteOpenHelper {
         List<String> args = new ArrayList<>();
         if (startDate != null && !startDate.isEmpty()) { sql.append(" AND s.service_date>=?"); args.add(startDate); }
         if (endDate != null && !endDate.isEmpty()) { sql.append(" AND s.service_date<=?"); args.add(endDate); }
+        String st = status == null ? "ALL" : status.trim().toUpperCase(Locale.ROOT);
+        if ("OPEN".equals(st) || "CLOSED".equals(st)) { sql.append(" AND s.status=?"); args.add(st); }
         String q = search == null ? "" : search.trim();
         if (!q.isEmpty()) {
             sql.append(" AND (s.plate LIKE ? OR s.plate LIKE ? OR s.service_text LIKE ? OR s.notes LIKE ? " +
@@ -217,6 +229,14 @@ public class DatabaseHelper extends SQLiteOpenHelper {
         return getWritableDatabase().delete("services", "id=?", new String[]{String.valueOf(id)});
     }
 
+    public boolean setServiceStatus(long id, String status) {
+        String st = "CLOSED".equalsIgnoreCase(status) ? "CLOSED" : "OPEN";
+        ContentValues v = new ContentValues();
+        v.put("status", st);
+        v.put("updated_at", nowIso());
+        return getWritableDatabase().update("services", v, "id=?", new String[]{String.valueOf(id)}) > 0;
+    }
+
     public int deleteServices(Set<Long> ids) {
         if (ids == null || ids.isEmpty()) return 0;
         SQLiteDatabase db = getWritableDatabase();
@@ -230,11 +250,17 @@ public class DatabaseHelper extends SQLiteOpenHelper {
     }
 
     public Summary summary(String startDate, String endDate) {
-        Cursor c = summaryCursor(startDate, endDate);
+        return summary(startDate, endDate, "ALL");
+    }
+
+    public Summary summary(String startDate, String endDate, String status) {
+        Cursor c = summaryCursor(startDate, endDate, status);
         try {
             if (!c.moveToFirst()) return new Summary();
             Summary s = new Summary();
             s.count = c.getInt(c.getColumnIndexOrThrow("service_count"));
+            s.openCount = c.getInt(c.getColumnIndexOrThrow("open_count"));
+            s.closedCount = c.getInt(c.getColumnIndexOrThrow("closed_count"));
             s.labor = c.getDouble(c.getColumnIndexOrThrow("service_total"));
             s.parts = c.getDouble(c.getColumnIndexOrThrow("parts_total"));
             s.total = s.labor + s.parts;
@@ -242,21 +268,44 @@ public class DatabaseHelper extends SQLiteOpenHelper {
         } finally { c.close(); }
     }
 
-    private Cursor summaryCursor(String startDate, String endDate) {
+    public Summary summaryForIds(Set<Long> ids) {
+        Summary out = new Summary();
+        if (ids == null || ids.isEmpty()) return out;
+        for (Long id : ids) {
+            Cursor c = service(id);
+            try {
+                if (!c.moveToFirst()) continue;
+                out.count++;
+                String st = c.getString(c.getColumnIndexOrThrow("status"));
+                if ("CLOSED".equalsIgnoreCase(st)) out.closedCount++; else out.openCount++;
+                out.labor += c.getDouble(c.getColumnIndexOrThrow("labor_value"));
+                out.parts += c.getDouble(c.getColumnIndexOrThrow("parts_total"));
+            } finally { c.close(); }
+        }
+        out.total = out.labor + out.parts;
+        return out;
+    }
+
+    private Cursor summaryCursor(String startDate, String endDate, String status) {
         StringBuilder sql = new StringBuilder(
-                "SELECT COUNT(*) service_count, COALESCE(SUM(s.labor_value),0) service_total, " +
+                "SELECT COUNT(*) service_count, " +
+                "COALESCE(SUM(CASE WHEN s.status='OPEN' THEN 1 ELSE 0 END),0) open_count, " +
+                "COALESCE(SUM(CASE WHEN s.status='CLOSED' THEN 1 ELSE 0 END),0) closed_count, " +
+                "COALESCE(SUM(s.labor_value),0) service_total, " +
                 "COALESCE(SUM((SELECT SUM(p.total_value) FROM parts p WHERE p.service_id=s.id)),0) parts_total " +
                 "FROM services s WHERE 1=1");
         List<String> args = new ArrayList<>();
         if (startDate != null && !startDate.isEmpty()) { sql.append(" AND s.service_date>=?"); args.add(startDate); }
         if (endDate != null && !endDate.isEmpty()) { sql.append(" AND s.service_date<=?"); args.add(endDate); }
+        String st = status == null ? "ALL" : status.trim().toUpperCase(Locale.ROOT);
+        if ("OPEN".equals(st) || "CLOSED".equals(st)) { sql.append(" AND s.status=?"); args.add(st); }
         return getReadableDatabase().rawQuery(sql.toString(), args.toArray(new String[0]));
     }
 
     public JSONObject exportAll() throws Exception {
         JSONObject root = new JSONObject();
         root.put("format", "controle-motos-piu");
-        root.put("version", 2);
+        root.put("version", 3);
         JSONArray services = new JSONArray();
         Cursor c = getReadableDatabase().rawQuery("SELECT * FROM services ORDER BY id", null);
         try {
@@ -272,6 +321,7 @@ public class DatabaseHelper extends SQLiteOpenHelper {
                 s.put("notes", c.getString(c.getColumnIndexOrThrow("notes")));
                 s.put("createdAt", c.getString(c.getColumnIndexOrThrow("created_at")));
                 s.put("updatedAt", c.getString(c.getColumnIndexOrThrow("updated_at")));
+                s.put("status", c.getString(c.getColumnIndexOrThrow("status")));
 
                 JSONArray itemArr = new JSONArray();
                 Cursor items = serviceItems(id);
@@ -352,6 +402,7 @@ public class DatabaseHelper extends SQLiteOpenHelper {
                 v.put("notes", s.optString("notes", ""));
                 v.put("created_at", s.optString("createdAt", nowIso()));
                 v.put("updated_at", s.optString("updatedAt", nowIso()));
+                v.put("status", "CLOSED".equalsIgnoreCase(s.optString("status")) ? "CLOSED" : "OPEN");
                 long newId = db.insertOrThrow("services", null, v);
 
                 for (int j = 0; j < items.length(); j++) {
@@ -388,15 +439,22 @@ public class DatabaseHelper extends SQLiteOpenHelper {
     }
 
     public String exportCsv(String startDate, String endDate) {
+        return exportCsv(startDate, endDate, "ALL", null);
+    }
+
+    public String exportCsv(String startDate, String endDate, String status, Set<Long> ids) {
         StringBuilder out = new StringBuilder();
-        out.append("Data;Placa;KM;Servicos;Pecas;Total_servicos;Total_pecas;Total;Observacao\n");
-        Cursor c = services("", startDate, endDate);
+        out.append("Status;Data;Placa;KM;Servicos;Pecas;Total_servicos;Total_pecas;Total;Observacao\n");
+        Cursor c = services("", startDate, endDate, status);
         try {
             while (c.moveToNext()) {
                 long id = c.getLong(c.getColumnIndexOrThrow("id"));
+                if (ids != null && !ids.isEmpty() && !ids.contains(id)) continue;
                 double servicesTotal = c.getDouble(c.getColumnIndexOrThrow("labor_value"));
                 double partsTotal = c.getDouble(c.getColumnIndexOrThrow("parts_total"));
-                out.append(csv(br(c.getString(c.getColumnIndexOrThrow("service_date"))))).append(';')
+                String st = "CLOSED".equalsIgnoreCase(c.getString(c.getColumnIndexOrThrow("status"))) ? "FECHADA" : "ABERTA";
+                out.append(csv(st)).append(';')
+                   .append(csv(br(c.getString(c.getColumnIndexOrThrow("service_date"))))).append(';')
                    .append(csv(displayPlate(c.getString(c.getColumnIndexOrThrow("plate"))))).append(';')
                    .append(c.getLong(c.getColumnIndexOrThrow("km"))).append(';')
                    .append(csv(servicesInline(id))).append(';')
@@ -407,6 +465,55 @@ public class DatabaseHelper extends SQLiteOpenHelper {
                    .append(csv(c.getString(c.getColumnIndexOrThrow("notes")))).append('\n');
             }
         } finally { c.close(); }
+        return out.toString();
+    }
+
+    public String exportExcelHtml(String startDate, String endDate, String status, Set<Long> ids) {
+        Summary summary = (ids == null || ids.isEmpty()) ? summary(startDate, endDate, status) : summaryForIds(ids);
+        String statusLabel = "OPEN".equalsIgnoreCase(status) ? "Somente abertas" :
+                ("CLOSED".equalsIgnoreCase(status) ? "Somente fechadas" : "Abertas e fechadas");
+        String periodLabel = (startDate == null || startDate.isEmpty()) && (endDate == null || endDate.isEmpty()) ? "Todos os períodos" :
+                (startDate == null || startDate.isEmpty() ? "Até " + br(endDate) :
+                        (endDate == null || endDate.isEmpty() ? "A partir de " + br(startDate) : br(startDate) + " a " + br(endDate)));
+
+        StringBuilder out = new StringBuilder();
+        out.append("<!DOCTYPE html><html><head><meta charset='UTF-8'><style>")
+           .append("body{font-family:Arial,sans-serif;font-size:12pt;color:#172033;background:#fff;margin:18px}table{border-collapse:collapse;width:100%}")
+           .append(".title{font-size:20pt;font-weight:700;color:#12233f;margin-bottom:3px}.sub{font-size:10.5pt;color:#66758a;margin-bottom:14px}")
+           .append(".summary{margin:0 0 18px 0}.summary td{padding:8px 12px;border:1px solid #dce3ec;background:#f8fafc}.summary .v{font-weight:700;font-size:13pt;color:#12233f}")
+           .append("th{background:#12233f;color:#fff;font-weight:700;padding:11px 9px;border:1px solid #aebccc;text-align:left;vertical-align:middle}")
+           .append("td{padding:10px 9px;border:1px solid #dce3ec;vertical-align:top;line-height:1.35}tr:nth-child(even){background:#f7f9fc}")
+           .append(".money{text-align:right;white-space:nowrap;mso-number-format:'0.00'}.km{text-align:right;white-space:nowrap}.plate{font-weight:700;white-space:nowrap}.status{font-weight:700;text-align:center;white-space:nowrap}.wrap{white-space:normal;min-width:240px}")
+           .append("</style></head><body>")
+           .append("<div class='title'>Controle de Motos • Piu</div>")
+           .append("<div class='sub'>").append(xml(periodLabel)).append(" • ").append(xml(statusLabel))
+           .append(ids != null && !ids.isEmpty() ? " • " + ids.size() + " OS selecionada(s)" : "").append("</div>")
+           .append("<table class='summary'><tr><td>Atendimentos<br><span class='v'>").append(summary.count).append("</span></td>")
+           .append("<td>Abertas<br><span class='v'>").append(summary.openCount).append("</span></td>")
+           .append("<td>Fechadas<br><span class='v'>").append(summary.closedCount).append("</span></td>")
+           .append("<td>Serviços<br><span class='v'>").append(xml(money(summary.labor))).append("</span></td>")
+           .append("<td>Peças<br><span class='v'>").append(xml(money(summary.parts))).append("</span></td>")
+           .append("<td>Total<br><span class='v'>").append(xml(money(summary.total))).append("</span></td></tr></table>")
+           .append("<table><colgroup><col style='width:90px'><col style='width:100px'><col style='width:105px'><col style='width:90px'><col style='width:320px'><col style='width:320px'><col style='width:110px'><col style='width:110px'><col style='width:115px'><col style='width:320px'></colgroup>")
+           .append("<tr><th>Status</th><th>Data</th><th>Placa</th><th>KM</th><th>Serviços</th><th>Peças</th><th>Serviços R$</th><th>Peças R$</th><th>Total R$</th><th>Observação</th></tr>");
+        Cursor c = services("", startDate, endDate, status);
+        try {
+            while (c.moveToNext()) {
+                long id = c.getLong(c.getColumnIndexOrThrow("id"));
+                if (ids != null && !ids.isEmpty() && !ids.contains(id)) continue;
+                double sv = c.getDouble(c.getColumnIndexOrThrow("labor_value"));
+                double pv = c.getDouble(c.getColumnIndexOrThrow("parts_total"));
+                String st = "CLOSED".equalsIgnoreCase(c.getString(c.getColumnIndexOrThrow("status"))) ? "FECHADA" : "ABERTA";
+                String servicesHtml = xml(servicesInline(id)).replace(" | ", "<br>");
+                String partsHtml = xml(partsInline(id)).replace(" | ", "<br>");
+                out.append("<tr><td class='status'>").append(xml(st)).append("</td><td>").append(xml(br(c.getString(c.getColumnIndexOrThrow("service_date"))))).append("</td><td class='plate'>")
+                   .append(xml(displayPlate(c.getString(c.getColumnIndexOrThrow("plate"))))).append("</td><td class='km'>").append(formatInt(c.getLong(c.getColumnIndexOrThrow("km")))).append("</td><td class='wrap'>")
+                   .append(servicesHtml).append("</td><td class='wrap'>").append(partsHtml).append("</td><td class='money'>").append(String.format(new Locale("pt", "BR"), "%.2f", sv)).append("</td><td class='money'>")
+                   .append(String.format(new Locale("pt", "BR"), "%.2f", pv)).append("</td><td class='money'><b>").append(String.format(new Locale("pt", "BR"), "%.2f", sv+pv)).append("</b></td><td class='wrap'>")
+                   .append(xml(c.getString(c.getColumnIndexOrThrow("notes")))).append("</td></tr>");
+            }
+        } finally { c.close(); }
+        out.append("</table></body></html>");
         return out.toString();
     }
 
@@ -655,6 +762,7 @@ public class DatabaseHelper extends SQLiteOpenHelper {
 
     private String br(String iso) { try { return brDay.format(isoDay.parse(iso)); } catch (Exception e) { return iso; } }
     private String toIso(String br) { try { return isoDay.format(brDay.parse(br)); } catch (Exception e) { return null; } }
+    private String xml(String s) { return (s == null ? "" : s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;"); }
     private String csv(String s) { return '"' + (s == null ? "" : s.replace("\"", "\"\"")) + '"'; }
     private static String nowIso() { return new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).format(new Date()); }
     private double round2(double v) { return Math.round(v * 100.0) / 100.0; }
@@ -671,7 +779,7 @@ public class DatabaseHelper extends SQLiteOpenHelper {
         return sb.toString();
     }
 
-    public static class Summary { public int count; public double labor, parts, total; }
+    public static class Summary { public int count, openCount, closedCount; public double labor, parts, total; }
     private static class DateRange {
         String start, end, label = "";
         String labelSuffix() { return label == null ? "" : label; }

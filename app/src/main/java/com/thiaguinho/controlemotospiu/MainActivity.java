@@ -66,10 +66,19 @@ public class MainActivity extends AppCompatActivity {
 
     private String currentScreen = "home";
     private String searchText = "";
+    private String homeStatusFilter = "ALL";
+    private String homeStartDate = null, homeEndDate = null;
     private boolean selectionMode = false;
     private final Set<Long> selectedIds = new HashSet<>();
     private TextView selectionCount;
     private Button selectedReportButton, selectedDeleteButton;
+
+    private String reportStatusFilter = "ALL";
+    private final Set<Long> reportSelectedIds = new HashSet<>();
+    private EditText reportStartInput, reportEndInput;
+    private TextView reportSummaryText, reportSelectionText;
+    private LinearLayout reportList;
+    private Button reportAllButton, reportOpenButton, reportClosedButton;
 
     private Long editingId = null;
     private EditText plateInput, kmInput, dateInput, notesInput;
@@ -112,11 +121,27 @@ public class MainActivity extends AppCompatActivity {
         search.setOnEditorActionListener((v, actionId, event) -> { searchText = search.getText().toString().trim(); showHome(); return true; });
         searchRow.addView(search, weight(1));
         searchRow.addView(searchBtn, fixed(94));
-        body.addView(searchRow, full(2, 7));
+        body.addView(searchRow, full(2, 5));
+
+        LinearLayout filterRow = horizontal();
+        Button all = filterButton("Todas", "ALL".equals(homeStatusFilter));
+        Button open = filterButton("Abertas", "OPEN".equals(homeStatusFilter));
+        Button closed = filterButton("Fechadas", "CLOSED".equals(homeStatusFilter));
+        all.setOnClickListener(v -> { homeStatusFilter = "ALL"; showHome(); });
+        open.setOnClickListener(v -> { homeStatusFilter = "OPEN"; showHome(); });
+        closed.setOnClickListener(v -> { homeStatusFilter = "CLOSED"; showHome(); });
+        filterRow.addView(all, weight(1)); filterRow.addView(open, weight(1)); filterRow.addView(closed, weight(1));
+        body.addView(filterRow, full(0, 3));
+
+        String periodText = homeStartDate == null && homeEndDate == null ? "Período: todos" :
+                "Período: " + (homeStartDate == null ? "início" : br(homeStartDate)) + " a " + (homeEndDate == null ? "hoje" : br(homeEndDate));
+        Button period = softButton(periodText);
+        period.setOnClickListener(v -> showHomePeriodDialog());
+        body.addView(period, full(0, 6));
 
         LinearLayout row1 = horizontal();
         Button ai = quickButton("IA local", "Consulte os dados");
-        Button reports = quickButton("Relatórios", "Resumo e PDF");
+        Button reports = quickButton("Relatórios", "Filtros, seleção e PDF");
         ai.setOnClickListener(v -> showAssistantPage());
         reports.setOnClickListener(v -> showReportsPage());
         row1.addView(ai, weight(1)); row1.addView(reports, weight(1));
@@ -132,12 +157,12 @@ public class MainActivity extends AppCompatActivity {
 
         Calendar now = Calendar.getInstance();
         Calendar first = (Calendar) now.clone(); first.set(Calendar.DAY_OF_MONTH, 1);
-        DatabaseHelper.Summary month = db.summary(isoDay.format(first.getTime()), isoDay.format(now.getTime()));
+        DatabaseHelper.Summary month = db.summary(isoDay.format(first.getTime()), isoDay.format(now.getTime()), "ALL");
         LinearLayout monthCard = card(0xFFF8FAFC, 0xFFDDE5EF, 16);
         LinearLayout monthLine = horizontal();
         LinearLayout left = new LinearLayout(this); left.setOrientation(LinearLayout.VERTICAL);
         left.addView(tv("ESTE MÊS", 9, true, C.muted));
-        left.addView(tv(month.count + " atendimento(s)", 14, true, C.text));
+        left.addView(tv(month.count + " atendimento(s) • " + month.openCount + " aberta(s) • " + month.closedCount + " fechada(s)", 11, true, C.text));
         TextView monthTotal = tv(money(month.total), 17, true, C.green); monthTotal.setGravity(Gravity.END);
         monthLine.addView(left, weight(1)); monthLine.addView(monthTotal, wrap());
         monthCard.addView(monthLine);
@@ -160,7 +185,7 @@ public class MainActivity extends AppCompatActivity {
             body.addView(selectedBar, full(0, 8));
         }
 
-        Cursor c = db.services(searchText, null, null);
+        Cursor c = db.services(searchText, homeStartDate, homeEndDate, homeStatusFilter);
         int shown = 0;
         try {
             while (c.moveToNext()) {
@@ -170,7 +195,8 @@ public class MainActivity extends AppCompatActivity {
         } finally { c.close(); }
 
         if (shown == 0) {
-            TextView empty = tv(searchText.isEmpty() ? "Nenhum atendimento ainda.\nToque em “Novo atendimento”." : "Nenhum atendimento encontrado.", 14, true, C.muted);
+            boolean filtered = !searchText.isEmpty() || !"ALL".equals(homeStatusFilter) || homeStartDate != null || homeEndDate != null;
+            TextView empty = tv(filtered ? "Nenhum atendimento encontrado com estes filtros." : "Nenhum atendimento ainda.\nToque em “Novo atendimento”.", 14, true, C.muted);
             empty.setGravity(Gravity.CENTER); empty.setPadding(dp(20), dp(30), dp(20), dp(30));
             body.addView(empty, full(5, 10));
         }
@@ -179,12 +205,37 @@ public class MainActivity extends AppCompatActivity {
         setContentView(page);
     }
 
+    private void showHomePeriodDialog() {
+        LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setPadding(dp(18), dp(8), dp(18), 0);
+        EditText start = input("Início"); start.setFocusable(false); start.setText(homeStartDate == null ? "" : br(homeStartDate)); start.setOnClickListener(v -> pickDate(start));
+        EditText end = input("Fim"); end.setFocusable(false); end.setText(homeEndDate == null ? "" : br(homeEndDate)); end.setOnClickListener(v -> pickDate(end));
+        box.addView(field("De", start), full(0, 7)); box.addView(field("Até", end), full(0, 2));
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Filtrar período").setView(box)
+                .setNegativeButton("Cancelar", null)
+                .setNeutralButton("Limpar", null)
+                .setPositiveButton("Aplicar", null).create();
+        dialog.setOnShowListener(x -> {
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> { homeStartDate = null; homeEndDate = null; dialog.dismiss(); showHome(); });
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+                try {
+                    homeStartDate = start.getText().toString().trim().isEmpty() ? null : toIso(start.getText().toString());
+                    homeEndDate = end.getText().toString().trim().isEmpty() ? null : toIso(end.getText().toString());
+                    if (homeStartDate != null && homeEndDate != null && homeStartDate.compareTo(homeEndDate) > 0) throw new Exception("A data inicial não pode ser maior que a final.");
+                    dialog.dismiss(); showHome();
+                } catch (Exception e) { error(e.getMessage()); }
+            });
+        });
+        dialog.show();
+    }
+
     private View serviceCard(Cursor c) {
         long id = c.getLong(c.getColumnIndexOrThrow("id"));
         String plate = c.getString(c.getColumnIndexOrThrow("plate"));
         long km = c.getLong(c.getColumnIndexOrThrow("km"));
         String date = c.getString(c.getColumnIndexOrThrow("service_date"));
         String service = c.getString(c.getColumnIndexOrThrow("service_text"));
+        String status = c.getString(c.getColumnIndexOrThrow("status"));
+        boolean closed = "CLOSED".equalsIgnoreCase(status);
         int servicesCount = c.getInt(c.getColumnIndexOrThrow("service_items_count"));
         int partsCount = c.getInt(c.getColumnIndexOrThrow("parts_count"));
         double total = c.getDouble(c.getColumnIndexOrThrow("labor_value")) + c.getDouble(c.getColumnIndexOrThrow("parts_total"));
@@ -226,22 +277,42 @@ public class MainActivity extends AppCompatActivity {
 
         TextView svc = tv(service, 14, true, C.text); svc.setMaxLines(2); svc.setEllipsize(TextUtils.TruncateAt.END);
         info.addView(svc, full(1, 2));
-        TextView meta = tv(servicesCount + " serviço(s) • " + partsCount + " peça(s)", 10, false, C.muted);
-        info.addView(meta, full(0, 4));
+
+        LinearLayout metaRow = horizontal();
+        TextView statusChip = tv(closed ? "FECHADA" : "ABERTA", 9, true, closed ? C.muted : C.green);
+        statusChip.setGravity(Gravity.CENTER); statusChip.setPadding(dp(10), dp(5), dp(10), dp(5));
+        statusChip.setBackground(bg(closed ? 0xFFF1F5F9 : 0xFFECFDF3, closed ? 0xFFCBD5E1 : 0xFFB7E4C7, 20));
+        TextView meta = tv(servicesCount + " serviço(s) • " + partsCount + " peça(s)", 10, false, C.muted); meta.setGravity(Gravity.END);
+        metaRow.addView(statusChip, wrap()); metaRow.addView(meta, weight(1));
+        info.addView(metaRow, full(0, 7));
 
         if (!selectionMode) {
             LinearLayout actions = horizontal();
             Button edit = miniButton("Editar");
             Button pdf = miniButton("PDF");
+            Button toggle = miniButton(closed ? "Reabrir" : "Fechar"); toggle.setTextColor(closed ? C.blue : C.green);
             Button del = miniButton("Excluir"); del.setTextColor(C.red);
             edit.setOnClickListener(v -> showServiceEditor(id));
             pdf.setOnClickListener(v -> shareSingleReport(id));
+            toggle.setOnClickListener(v -> confirmToggleStatus(id, closed));
             del.setOnClickListener(v -> confirmDeleteOne(id));
-            actions.addView(edit, weight(1)); actions.addView(pdf, weight(1)); actions.addView(del, weight(1));
+            actions.addView(edit, weight(1)); actions.addView(pdf, weight(1)); actions.addView(toggle, weight(1)); actions.addView(del, weight(1));
             info.addView(actions, full(0, 0));
         }
         card.addView(info, fullNoMargin());
         return card;
+    }
+
+    private void confirmToggleStatus(long id, boolean currentlyClosed) {
+        String action = currentlyClosed ? "reabrir" : "fechar";
+        new AlertDialog.Builder(this)
+                .setTitle(currentlyClosed ? "Reabrir atendimento?" : "Fechar atendimento?")
+                .setMessage(currentlyClosed ? "A OS voltará para o status ABERTA." : "A OS será marcada como FECHADA e continuará no histórico.")
+                .setNegativeButton("Cancelar", null)
+                .setPositiveButton(currentlyClosed ? "Reabrir" : "Fechar", (d, w) -> {
+                    if (db.setServiceStatus(id, currentlyClosed ? "OPEN" : "CLOSED")) { toast("OS " + action + " com sucesso."); showHome(); }
+                    else error("Não foi possível atualizar o status da OS.");
+                }).show();
     }
 
     private View mercosulPlate(String plate) {
@@ -464,33 +535,146 @@ public class MainActivity extends AppCompatActivity {
 
     private void showReportsPage() {
         currentScreen = "reports";
-        LinearLayout page = basePage("Relatórios", "Período, resumo e compartilhamento", true);
+        reportSelectedIds.clear();
+        reportStatusFilter = "ALL";
+        LinearLayout page = basePage("Relatórios", "Filtre, selecione e exporte", true);
         LinearLayout body = bodyOf(page);
         Calendar now = Calendar.getInstance(); Calendar first = (Calendar) now.clone(); first.set(Calendar.DAY_OF_MONTH, 1);
-        EditText start = input("Início"); start.setFocusable(false); start.setText(br(isoDay.format(first.getTime()))); start.setOnClickListener(v -> pickDate(start));
-        EditText end = input("Fim"); end.setFocusable(false); end.setText(br(isoDay.format(now.getTime()))); end.setOnClickListener(v -> pickDate(end));
-        LinearLayout dates = horizontal(); dates.addView(field("De", start), weight(1)); dates.addView(field("Até", end), weight(1));
-        body.addView(dates, full(0, 8));
+        reportStartInput = input("Início"); reportStartInput.setFocusable(false); reportStartInput.setText(br(isoDay.format(first.getTime()))); reportStartInput.setOnClickListener(v -> pickDate(reportStartInput));
+        reportEndInput = input("Fim"); reportEndInput.setFocusable(false); reportEndInput.setText(br(isoDay.format(now.getTime()))); reportEndInput.setOnClickListener(v -> pickDate(reportEndInput));
+        LinearLayout dates = horizontal(); dates.addView(field("De", reportStartInput), weight(1)); dates.addView(field("Até", reportEndInput), weight(1));
+        body.addView(dates, full(0, 5));
 
-        TextView summary = tv("", 14, true, C.text); summary.setPadding(dp(14), dp(14), dp(14), dp(14)); summary.setBackground(bg(Color.WHITE, 0xFFDCE3EC, 16));
-        body.addView(summary, full(0, 7));
-        Button update = softButton("Atualizar resumo");
+        LinearLayout statusRow = horizontal();
+        reportAllButton = filterButton("Todas", true);
+        reportOpenButton = filterButton("Abertas", false);
+        reportClosedButton = filterButton("Fechadas", false);
+        reportAllButton.setOnClickListener(v -> setReportStatus("ALL"));
+        reportOpenButton.setOnClickListener(v -> setReportStatus("OPEN"));
+        reportClosedButton.setOnClickListener(v -> setReportStatus("CLOSED"));
+        statusRow.addView(reportAllButton, weight(1)); statusRow.addView(reportOpenButton, weight(1)); statusRow.addView(reportClosedButton, weight(1));
+        body.addView(statusRow, full(0, 5));
+
+        reportSummaryText = tv("", 14, true, C.text); reportSummaryText.setPadding(dp(14), dp(14), dp(14), dp(14)); reportSummaryText.setBackground(bg(Color.WHITE, 0xFFDCE3EC, 16));
+        body.addView(reportSummaryText, full(0, 6));
+
+        LinearLayout refreshRow = horizontal();
+        Button update = softButton("Atualizar");
+        Button selectAll = softButton("Selecionar todas");
+        Button clear = softButton("Limpar seleção");
+        update.setOnClickListener(v -> { reportSelectedIds.clear(); refreshReportsPage(); });
+        selectAll.setOnClickListener(v -> selectAllReportRows());
+        clear.setOnClickListener(v -> { reportSelectedIds.clear(); refreshReportsPage(); });
+        refreshRow.addView(update, weight(1)); refreshRow.addView(selectAll, weight(1)); refreshRow.addView(clear, weight(1));
+        body.addView(refreshRow, full(0, 4));
+
+        reportSelectionText = tv("Nenhuma OS selecionada • exporta todas do filtro", 10, true, C.muted);
+        body.addView(reportSelectionText, full(0, 4));
+
+        reportList = new LinearLayout(this); reportList.setOrientation(LinearLayout.VERTICAL);
+        body.addView(reportList, full(0, 7));
+
         Button detailed = button("Compartilhar PDF detalhado", C.blue);
         Button simple = button("Compartilhar PDF resumido", C.navy);
-        body.addView(update, full(0, 5)); body.addView(detailed, full(0, 5)); body.addView(simple, full(0, 7));
+        Button excel = button("Exportar planilha formatada", C.green);
+        detailed.setOnClickListener(v -> exportReportPdf(true));
+        simple.setOnClickListener(v -> exportReportPdf(false));
+        excel.setOnClickListener(v -> exportReportSpreadsheet());
+        body.addView(detailed, full(0, 5)); body.addView(simple, full(0, 5)); body.addView(excel, full(0, 7));
 
-        Runnable refresh = () -> {
-            try {
-                DatabaseHelper.Summary s = db.summary(toIso(start.getText().toString()), toIso(end.getText().toString()));
-                summary.setText(s.count + " atendimento(s)\nServiços: " + money(s.labor) + "\nPeças: " + money(s.parts) + "\nTOTAL: " + money(s.total));
-            } catch (Exception e) { summary.setText("Confira as datas informadas."); }
-        };
-        update.setOnClickListener(v -> refresh.run());
-        detailed.setOnClickListener(v -> { try { shareRangeReport(toIso(start.getText().toString()), toIso(end.getText().toString()), true); } catch (Exception e) { error(e.getMessage()); } });
-        simple.setOnClickListener(v -> { try { shareRangeReport(toIso(start.getText().toString()), toIso(end.getText().toString()), false); } catch (Exception e) { error(e.getMessage()); } });
-        refresh.run();
+        refreshReportsPage();
         footer(body);
         setContentView(page);
+    }
+
+    private void setReportStatus(String status) {
+        reportStatusFilter = status;
+        reportSelectedIds.clear();
+        styleFilterButton(reportAllButton, "ALL".equals(status));
+        styleFilterButton(reportOpenButton, "OPEN".equals(status));
+        styleFilterButton(reportClosedButton, "CLOSED".equals(status));
+        refreshReportsPage();
+    }
+
+    private void refreshReportsPage() {
+        if (reportList == null) return;
+        try {
+            String start = toIso(reportStartInput.getText().toString());
+            String end = toIso(reportEndInput.getText().toString());
+            if (start.compareTo(end) > 0) throw new Exception("A data inicial não pode ser maior que a final.");
+            reportList.removeAllViews();
+            Set<Long> available = new HashSet<>();
+            Cursor c = db.services("", start, end, reportStatusFilter);
+            int shown = 0;
+            try {
+                while (c.moveToNext()) {
+                    shown++;
+                    long id = c.getLong(c.getColumnIndexOrThrow("id")); available.add(id);
+                    reportList.addView(reportServiceRow(c), full(0, 5));
+                }
+            } finally { c.close(); }
+            reportSelectedIds.retainAll(available);
+            if (shown == 0) {
+                TextView empty = tv("Nenhuma OS encontrada neste período/status.", 12, true, C.muted); empty.setGravity(Gravity.CENTER); empty.setPadding(dp(10), dp(18), dp(10), dp(18));
+                reportList.addView(empty, full(0, 4));
+            }
+            refreshReportSummary(start, end);
+        } catch (Exception e) { reportSummaryText.setText("Confira as datas informadas."); }
+    }
+
+    private View reportServiceRow(Cursor c) {
+        long id = c.getLong(c.getColumnIndexOrThrow("id"));
+        String status = c.getString(c.getColumnIndexOrThrow("status"));
+        boolean closed = "CLOSED".equalsIgnoreCase(status);
+        double total = c.getDouble(c.getColumnIndexOrThrow("labor_value")) + c.getDouble(c.getColumnIndexOrThrow("parts_total"));
+        LinearLayout row = card(Color.WHITE, 0xFFDCE3EC, 14); row.setPadding(dp(10), dp(8), dp(10), dp(8));
+        LinearLayout line = horizontal();
+        CheckBox cb = new CheckBox(this); cb.setChecked(reportSelectedIds.contains(id)); cb.setButtonTintList(android.content.res.ColorStateList.valueOf(C.blue));
+        LinearLayout names = new LinearLayout(this); names.setOrientation(LinearLayout.VERTICAL);
+        names.addView(tv(DatabaseHelper.displayPlate(c.getString(c.getColumnIndexOrThrow("plate"))) + " • " + br(c.getString(c.getColumnIndexOrThrow("service_date"))), 11, true, C.text));
+        names.addView(tv(closed ? "FECHADA" : "ABERTA", 9, true, closed ? C.muted : C.green));
+        TextView totalTv = tv(money(total), 11, true, C.green); totalTv.setGravity(Gravity.END);
+        line.addView(cb, fixed(44)); line.addView(names, weight(1)); line.addView(totalTv, wrap()); row.addView(line);
+        cb.setOnCheckedChangeListener((v, checked) -> { if (checked) reportSelectedIds.add(id); else reportSelectedIds.remove(id); refreshReportSummarySafe(); });
+        row.setOnClickListener(v -> cb.setChecked(!cb.isChecked()));
+        return row;
+    }
+
+    private void selectAllReportRows() {
+        try {
+            String start = toIso(reportStartInput.getText().toString()); String end = toIso(reportEndInput.getText().toString());
+            Cursor c = db.services("", start, end, reportStatusFilter);
+            try { while (c.moveToNext()) reportSelectedIds.add(c.getLong(c.getColumnIndexOrThrow("id"))); } finally { c.close(); }
+            refreshReportsPage();
+        } catch (Exception e) { error(e.getMessage()); }
+    }
+
+    private void refreshReportSummarySafe() {
+        try { refreshReportSummary(toIso(reportStartInput.getText().toString()), toIso(reportEndInput.getText().toString())); }
+        catch (Exception e) { reportSummaryText.setText("Confira as datas informadas."); }
+    }
+
+    private void refreshReportSummary(String start, String end) {
+        DatabaseHelper.Summary s = reportSelectedIds.isEmpty() ? db.summary(start, end, reportStatusFilter) : db.summaryForIds(reportSelectedIds);
+        reportSummaryText.setText(s.count + " atendimento(s)\nAbertas: " + s.openCount + " • Fechadas: " + s.closedCount +
+                "\nServiços: " + money(s.labor) + "\nPeças: " + money(s.parts) + "\nTOTAL: " + money(s.total));
+        reportSelectionText.setText(reportSelectedIds.isEmpty() ? "Nenhuma OS selecionada • exporta todas do filtro" : reportSelectedIds.size() + " OS selecionada(s) • exporta somente estas");
+    }
+
+    private void exportReportPdf(boolean detailed) {
+        try {
+            String start = toIso(reportStartInput.getText().toString()); String end = toIso(reportEndInput.getText().toString());
+            List<Long> ids = reportSelectedIds.isEmpty() ? null : new ArrayList<>(reportSelectedIds);
+            sharePdf(buildReportPdf(detailed ? "Relatório Detalhado" : "Relatório Resumido", start, end, ids, detailed, reportStatusFilter), "relatorio-piu-" + start + "-a-" + end + ".pdf");
+        } catch (Exception e) { error(e.getMessage()); }
+    }
+
+    private void exportReportSpreadsheet() {
+        try {
+            String start = toIso(reportStartInput.getText().toString()); String end = toIso(reportEndInput.getText().toString());
+            Set<Long> ids = reportSelectedIds.isEmpty() ? null : new HashSet<>(reportSelectedIds);
+            shareSpreadsheet(db.exportExcelHtml(start, end, reportStatusFilter, ids), "planilha-atendimentos-piu-" + start + "-a-" + end + ".xls");
+        } catch (Exception e) { error(e.getMessage()); }
     }
 
     private void showBackupPage() {
@@ -504,11 +688,16 @@ public class MainActivity extends AppCompatActivity {
 
         Button exp = button("Exportar backup completo", C.blue);
         Button imp = button("Importar / restaurar backup", C.green);
-        Button csv = softButton("Exportar planilha CSV");
+        Button excel = softButton("Exportar planilha Excel formatada");
+        Button csv = softButton("Exportar CSV simples");
         exp.setOnClickListener(v -> createDocument("application/json", "backup-controle-motos-piu-" + isoDay.format(new Date()) + ".json", REQ_EXPORT_BACKUP));
         imp.setOnClickListener(v -> openDocument());
+        excel.setOnClickListener(v -> {
+            try { shareSpreadsheet(db.exportExcelHtml(null, null, "ALL", null), "planilha-completa-piu-" + isoDay.format(new Date()) + ".xls"); }
+            catch (Exception e) { error(e.getMessage()); }
+        });
         csv.setOnClickListener(v -> createDocument("text/csv", "atendimentos-piu-" + isoDay.format(new Date()) + ".csv", REQ_EXPORT_CSV));
-        body.addView(exp, full(0, 6)); body.addView(imp, full(0, 6)); body.addView(csv, full(0, 8));
+        body.addView(exp, full(0, 6)); body.addView(imp, full(0, 6)); body.addView(excel, full(0, 5)); body.addView(csv, full(0, 8));
         footer(body);
         setContentView(page);
     }
@@ -572,35 +761,35 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void shareSingleReport(long id) {
-        try { List<Long> one = new ArrayList<>(); one.add(id); sharePdf(buildReportPdf("Relatório de Atendimento", null, null, one, true), "relatorio-atendimento-piu.pdf"); }
+        try { List<Long> one = new ArrayList<>(); one.add(id); sharePdf(buildReportPdf("Relatório de Atendimento", null, null, one, true, "ALL"), "relatorio-atendimento-piu.pdf"); }
         catch (Exception e) { error(e.getMessage()); }
     }
 
     private void shareSelectedReport() {
-        try { sharePdf(buildReportPdf("Atendimentos Selecionados", null, null, new ArrayList<>(selectedIds), true), "relatorio-selecionados-piu.pdf"); }
+        try { sharePdf(buildReportPdf("Atendimentos Selecionados", null, null, new ArrayList<>(selectedIds), true, "ALL"), "relatorio-selecionados-piu.pdf"); }
         catch (Exception e) { error(e.getMessage()); }
     }
 
     private void shareRangeReport(String start, String end, boolean detailed) {
-        try { sharePdf(buildReportPdf(detailed ? "Relatório Detalhado" : "Relatório Resumido", start, end, null, detailed), "relatorio-piu-" + start + "-a-" + end + ".pdf"); }
+        try { sharePdf(buildReportPdf(detailed ? "Relatório Detalhado" : "Relatório Resumido", start, end, null, detailed, "ALL"), "relatorio-piu-" + start + "-a-" + end + ".pdf"); }
         catch (Exception e) { error(e.getMessage()); }
     }
 
-    private File buildReportPdf(String title, String start, String end, List<Long> ids, boolean detailed) throws Exception {
+    private File buildReportPdf(String title, String start, String end, List<Long> ids, boolean detailed, String statusFilter) throws Exception {
         File dir = new File(getCacheDir(), "reports"); if (!dir.exists() && !dir.mkdirs()) throw new Exception("Não foi possível preparar o relatório.");
         File file = new File(dir, "piu-report-" + System.currentTimeMillis() + ".pdf");
         PdfDocument doc = new PdfDocument(); PdfWriter writer = new PdfWriter(doc);
         writer.header(title, start != null || end != null ? "Período: " + (start == null ? "início" : br(start)) + " a " + (end == null ? "hoje" : br(end)) : "Controle de Motos • Piu");
 
-        double servicesSum = 0, partsSum = 0; int count = 0;
-        Cursor c = ids == null ? db.services("", start, end) : null;
+        double servicesSum = 0, partsSum = 0; int count = 0, openCount = 0, closedCount = 0;
+        Cursor c = ids == null ? db.services("", start, end, statusFilter) : null;
         try {
             if (ids == null) {
                 while (c.moveToNext()) {
                     long id = c.getLong(c.getColumnIndexOrThrow("id"));
                     servicesSum += c.getDouble(c.getColumnIndexOrThrow("labor_value"));
                     partsSum += c.getDouble(c.getColumnIndexOrThrow("parts_total"));
-                    count++; writeService(writer, c, id, detailed);
+                    count++; if ("CLOSED".equalsIgnoreCase(c.getString(c.getColumnIndexOrThrow("status")))) closedCount++; else openCount++; writeService(writer, c, id, detailed);
                 }
             } else {
                 for (Long id : ids) {
@@ -609,13 +798,13 @@ public class MainActivity extends AppCompatActivity {
                         if (one.moveToFirst()) {
                             servicesSum += one.getDouble(one.getColumnIndexOrThrow("labor_value"));
                             partsSum += one.getDouble(one.getColumnIndexOrThrow("parts_total"));
-                            count++; writeService(writer, one, id, detailed);
+                            count++; if ("CLOSED".equalsIgnoreCase(one.getString(one.getColumnIndexOrThrow("status")))) closedCount++; else openCount++; writeService(writer, one, id, detailed);
                         }
                     } finally { one.close(); }
                 }
             }
         } finally { if (c != null) c.close(); }
-        writer.summary(count, servicesSum, partsSum);
+        writer.summary(count, openCount, closedCount, servicesSum, partsSum);
         writer.finish();
         try (FileOutputStream out = new FileOutputStream(file)) { doc.writeTo(out); } finally { doc.close(); }
         return file;
@@ -628,6 +817,9 @@ public class MainActivity extends AppCompatActivity {
         String date = br(c.getString(c.getColumnIndexOrThrow("service_date")));
         long km = c.getLong(c.getColumnIndexOrThrow("km"));
         w.serviceHeader(plate, date, formatInt(km) + " km", money(services + parts));
+        boolean closed = "CLOSED".equalsIgnoreCase(c.getString(c.getColumnIndexOrThrow("status")));
+        w.line("STATUS: " + (closed ? "FECHADA" : "ABERTA"), 8.5f, true, closed ? C.muted : C.green, 0);
+        w.spacer(3);
 
         if (!detailed) {
             w.line(c.getString(c.getColumnIndexOrThrow("service_text")), 10, true, C.text, 0);
@@ -666,6 +858,16 @@ public class MainActivity extends AppCompatActivity {
         Intent share = new Intent(Intent.ACTION_SEND); share.setType("application/pdf");
         share.putExtra(Intent.EXTRA_STREAM, uri); share.putExtra(Intent.EXTRA_SUBJECT, subject);
         share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION); startActivity(Intent.createChooser(share, "Enviar relatório"));
+    }
+
+    private void shareSpreadsheet(String html, String filename) throws Exception {
+        File dir = new File(getCacheDir(), "reports"); if (!dir.exists() && !dir.mkdirs()) throw new Exception("Não foi possível preparar a planilha.");
+        File file = new File(dir, filename);
+        try (FileOutputStream out = new FileOutputStream(file)) { out.write(("\uFEFF" + html).getBytes(StandardCharsets.UTF_8)); }
+        Uri uri = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", file);
+        Intent share = new Intent(Intent.ACTION_SEND); share.setType("application/vnd.ms-excel");
+        share.putExtra(Intent.EXTRA_STREAM, uri); share.putExtra(Intent.EXTRA_SUBJECT, filename);
+        share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION); startActivity(Intent.createChooser(share, "Enviar planilha"));
     }
 
     private class PdfWriter {
@@ -769,16 +971,17 @@ public class MainActivity extends AppCompatActivity {
             y += 55;
         }
 
-        void summary(int count, double services, double parts) {
-            ensure(92); spacer(6);
-            paint.setColor(C.navy); canvas.drawRoundRect(new RectF(margin, y, width - margin, y + 78), 12, 12, paint);
+        void summary(int count, int openCount, int closedCount, double services, double parts) {
+            ensure(102); spacer(6);
+            paint.setColor(C.navy); canvas.drawRoundRect(new RectF(margin, y, width - margin, y + 88), 12, 12, paint);
             paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD)); paint.setTextSize(10); paint.setColor(C.sky);
             canvas.drawText("RESUMO DO RELATÓRIO", margin + 14, y + 20, paint);
-            paint.setTypeface(Typeface.DEFAULT); paint.setTextSize(9); paint.setColor(0xFFD7E0ED);
-            canvas.drawText(count + " atendimento(s)  •  Serviços " + money(services) + "  •  Peças " + money(parts), margin + 14, y + 41, paint);
+            paint.setTypeface(Typeface.DEFAULT); paint.setTextSize(8.5f); paint.setColor(0xFFD7E0ED);
+            canvas.drawText(count + " atendimento(s)  •  " + openCount + " aberta(s)  •  " + closedCount + " fechada(s)", margin + 14, y + 39, paint);
+            canvas.drawText("Serviços " + money(services) + "  •  Peças " + money(parts), margin + 14, y + 56, paint);
             paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD)); paint.setTextSize(16); paint.setColor(Color.WHITE);
-            canvas.drawText("TOTAL  " + money(services + parts), margin + 14, y + 65, paint);
-            y += 88;
+            canvas.drawText("TOTAL  " + money(services + parts), margin + 14, y + 77, paint);
+            y += 98;
         }
 
         void line(String text, float size, boolean bold, int color, float indent) {
@@ -890,6 +1093,18 @@ public class MainActivity extends AppCompatActivity {
 
     private Button softButton(String text) {
         Button b = button(text, 0xFFF8FAFC); b.setTextColor(C.text); b.setBackground(bg(0xFFF8FAFC, 0xFFDCE3EC, 13)); return b;
+    }
+
+    private Button filterButton(String text, boolean selected) {
+        Button b = selected ? button(text, C.blue) : softButton(text);
+        b.setTextSize(10); b.setMinHeight(dp(42));
+        return b;
+    }
+
+    private void styleFilterButton(Button b, boolean selected) {
+        if (b == null) return;
+        b.setTextColor(selected ? Color.WHITE : C.text);
+        b.setBackground(bg(selected ? C.blue : 0xFFF8FAFC, selected ? C.blue : 0xFFDCE3EC, 13));
     }
 
     private Button quickButton(String title, String subtitle) {
